@@ -1,0 +1,3 @@
+[submodule "Bixby"]
+	path = Bixby
+	url = git@github.com:LevelHome/Bixby.git
