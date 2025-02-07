@@ -668,4 +668,3 @@ int BLECharSettingsInit(const struct bt_gatt_attr *in_setting_value_attr)
     return 0;
 }
 
-

@@ -37,6 +37,8 @@ const uint16_t kBLEProfile_LevelServiceChangedCharacteristicShortID = BLEProfile
 const uint16_t kBLEProfile_SettingsNameCharacteristicShortID        = BLEProfile_SettingsNameCharacteristicShortID;
 const uint16_t kBLEProfile_SettingsValueCharacteristicShortID       = BLEProfile_SettingsValueCharacteristicShortID;
 const uint16_t kBLEProfile_SidewalkCharacteristicShortID            = BLEProfile_SidewalkCharacteristicShortID;
+const uint16_t kBLEProfile_UWBtxCharacteristicShortID               = BLEProfile_UWBtxCharacteristicShortID;
+const uint16_t kBLEProfile_UWBrxCharacteristicShortID               = BLEProfile_UWBrxCharacteristicShortID;
 #if defined(CPU1_FACTORY_APP) || defined(CPU2_FACTORY_APP)
 const uint16_t kBLEProfile_RELtestCharacteristicShortID             = BLEProfile_RELtestCharacteristicShortID;
 #endif
@@ -48,6 +50,8 @@ static struct bt_uuid_16 kDFUrxCharacteristicID             = BT_UUID_INIT_16( B
 static struct bt_uuid_16 kStatusCharacteristicID            = BT_UUID_INIT_16( BLEProfile_StatusCharacteristicShortID );
 static struct bt_uuid_16 kSettingsNameCharacteristicID      = BT_UUID_INIT_16( kBLEProfile_SettingsNameCharacteristicShortID );
 static struct bt_uuid_16 kSettingsValueCharacteristicID     = BT_UUID_INIT_16( kBLEProfile_SettingsValueCharacteristicShortID );
+static struct bt_uuid_16 kUWBtxCharacteristicID             = BT_UUID_INIT_16( BLEProfile_UWBtxCharacteristicShortID );
+static struct bt_uuid_16 kUWBrxCharacteristicID             = BT_UUID_INIT_16( BLEProfile_UWBrxCharacteristicShortID );
 #if defined(CPU1_FACTORY_APP) || defined(CPU2_FACTORY_APP)
 static struct bt_uuid_16 kSettingsRELtestCharacteristicID   = BT_UUID_INIT_16( kBLEProfile_RELtestCharacteristicShortID );
 #endif
@@ -81,6 +85,14 @@ BT_GATT_SERVICE_DEFINE(mLevelService,
         BT_GATT_CHRC_NOTIFY | BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE | BT_GATT_CHRC_WRITE_WITHOUT_RESP,
         BT_GATT_PERM_READ | BT_GATT_PERM_WRITE,
         BLEinternalReadSettingValue, BLEinternalWriteSettingValue, NULL),
+    BT_GATT_CCC(_cccd_changed,
+        BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
+    BT_GATT_CHARACTERISTIC(&kUWBtxCharacteristicID.uuid,
+        BT_GATT_CHRC_WRITE | BT_GATT_CHRC_WRITE_WITHOUT_RESP, BT_GATT_PERM_WRITE,
+        NULL, BLEinternalWriteUWB, NULL),
+    BT_GATT_CHARACTERISTIC(&kUWBrxCharacteristicID.uuid,
+        BT_GATT_CHRC_NOTIFY, BT_GATT_PERM_READ,
+        BLEinternalReadUWB, NULL, NULL),
     BT_GATT_CCC(_cccd_changed,
         BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
 #if defined(CPU1_FACTORY_APP) || defined(CPU2_FACTORY_APP)

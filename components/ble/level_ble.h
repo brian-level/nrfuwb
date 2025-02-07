@@ -25,13 +25,14 @@ typedef const void *ble_conn_handle_t;
 #define BT_MAX_CONCURRENT               ( 2 )
 
 #define BT_UUID_STARGAZER_VAL           ( 0xF00D )
+#define BT_UUID_NRFUWB_VAL              ( 0xB00B )
 #define BT_UUID_LEVEL_VAL               ( 0xFDBF )
 
-#define BT_UUID_SERVICE                 BT_UUID_STARGAZER_VAL
+#define BT_UUID_SERVICE                 BT_UUID_NRFUWB_VAL
 
 // Base UUID - use the SIG UUID here since we're using our SIG-assigned 16-bit UUID for the service
-#define APP_BLE_PROFILE_BASE_UUID                           { 0xFB, 0x34, 0x9B, 0x5F, 0x80, 0x00, 0x00, 0x80, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }
-#define APP_BLE_PROFILE_SERVICE_SHORT_UUID                  ( 0xFDBF )
+#define APP_BLE_PROFILE_BASE_UUID                           { 0xFB, 0x34, 0x9B, 0x5F, 0x80, 0x00, 0x00, 0x80, 0x00, 0x10, 0x00, 0x00, 0x0B, 0xB0, 0x00, 0x00 }
+#define APP_BLE_PROFILE_SERVICE_SHORT_UUID                  BT_UUID_NRFUWB_VAL
 
 #define BLEProfile_ConsoleCharacteristicShortID             ( 0x0002 )
 #define BLEProfile_CommandCharacteristicShortID             ( 0x0010 )
@@ -41,6 +42,8 @@ typedef const void *ble_conn_handle_t;
 #define BLEProfile_LevelServiceChangedCharacteristicShortID ( 0x0015 )
 #define BLEProfile_SettingsNameCharacteristicShortID        ( 0x0020 )
 #define BLEProfile_SettingsValueCharacteristicShortID       ( 0x0021 )
+#define BLEProfile_UWBtxCharacteristicShortID               ( 0x0023 )
+#define BLEProfile_UWBrxCharacteristicShortID               ( 0x0022 )
 #define BLEProfile_SidewalkCharacteristicShortID            ( 0x96C9 )
 #if defined(CPU1_FACTORY_APP) || defined(CPU2_FACTORY_APP)
 #define BLEProfile_RELtestCharacteristicShortID             ( 0xABCD )

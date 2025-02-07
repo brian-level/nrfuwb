@@ -5,5 +5,6 @@ cmake_minimum_required(VERSION 3.20.0)
          ble_service.c
          ble_char_command.c
          ble_char_settings.c
+         ble_char_uwb.c
 	)
 

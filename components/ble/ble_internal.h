@@ -136,5 +136,21 @@ ssize_t BLEinternalReadSettingValue(
                             uint16_t offset
                        );
 
+ssize_t BLEinternalWriteUWB(
+                            struct bt_conn *conn,
+                            const struct bt_gatt_attr *attr,
+                            const void *buf,
+                            uint16_t len,
+                            uint16_t offset,
+                            uint8_t flags
+                       );
+
+ssize_t BLEinternalReadUWB(
+                            struct bt_conn *conn,
+                            const struct bt_gatt_attr *attr,
+                            void *buf,
+                            uint16_t len,
+                            uint16_t offset
+                       );
 int BLECharSettingsInit(const struct bt_gatt_attr *in_attr);
 
