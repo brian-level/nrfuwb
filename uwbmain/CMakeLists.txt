@@ -48,6 +48,7 @@ set(APPLICATION_SRCS
 add_level_component(uci)
 add_level_component(hbci)
 add_level_component(nrfspi)
+add_level_component(timesvc)
 add_level_component(crypto)
 
 if(CONFIG_BT)
