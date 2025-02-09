@@ -10,14 +10,11 @@
 #endif
 #include "timesvc.h"
 #include "crypto_platform.h"
-#include "uci_proto.h"
-#include "hbci_proto.h"
-#include "nrfspi.h"
+#include "uwb.h"
 
 int main( void )
 {
     int ret;
-    bool warmStart;
 
     LOG_INF("NRF UWB Device");
 
@@ -30,13 +27,7 @@ int main( void )
     ret = TimeInit();
     require_noerr(ret, exit);
 
-    ret = NRFSPIinit();
-    require_noerr(ret, exit);
-
-    ret = HBCIprotoInit(&warmStart);
-    require_noerr(ret, exit);
-
-    ret = UCIprotoInit(warmStart);
+    ret = UWBinit();
     require_noerr(ret, exit);
 
 #if CONFIG_BT
@@ -47,8 +38,8 @@ int main( void )
     //
     while (true)
     {
-        min_delay = delay;
         delay = 200;
+        min_delay = delay;
 
         #if CONFIG_BT
         ret = BLEslice(&delay);
@@ -58,7 +49,7 @@ int main( void )
         }
         #endif
 
-        ret = UCIprotoSlice(&delay);
+        ret = UWBSlice(&delay);
         if (delay < min_delay)
         {
             min_delay = delay;

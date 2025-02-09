@@ -14,7 +14,19 @@
 // Define this non-0 to dump protocol bytes
 #define DUMP_PROTO 1
 
-#define UCI_RESP_TIMEOUT    (30)
+// wait this long after reset to start commands, even when
+// uwbs stays its ok,  it doesn't really respond to the first command
+// (this doesn't seem to help, but keep in in case needed)
+//
+#define UCI_RESET_DELAY_MS  (10)
+
+// give uwbs this many millisecs to respond before re-trying
+//
+#define UCI_RESP_TIMEOUT_MS (60)
+
+// after this many timeouts, reset the connnection
+//
+#define UCI_MAX_TIMEOUTS    (4)
 
 static struct
 {
@@ -26,6 +38,7 @@ static struct
         UCI_IDLE,
         UCI_TX,
         UCI_RX,
+        UCI_DELAY
     }
     state, nextstate;
 
@@ -35,10 +48,12 @@ static struct
     }
     uwb_state;
 
+    bool    online;
     bool    needs_reset;
     bool    got_dev_info;
     bool    got_cap_info;
 
+    uint64_t delay;
     uint64_t cmd_start;
     uint32_t timeout_count;
 
@@ -169,20 +184,30 @@ static void uci_decode(
                         {
                             LOG_INF("UWB Device Status Init, Booting");
                             mUCI.state = UCI_INIT;
+                            mUCI.needs_reset = true;
                         }
                     }
                     else if (inData[0] == 1)
                     {
                         LOG_INF("UWB Device Ready");
 
+                        mUCI.online = true;
                         if (mUCI.state == UCI_OFFLINE)
                         {
+                            #if 1
                             LOG_INF("Ready, go to IDLE state");
                             mUCI.state = UCI_IDLE;
+                            #else
+                            LOG_INF("Ready, go to DELAY state");
+                            mUCI.state = UCI_DELAY;
+                            mUCI.nextstate = UCI_IDLE;
+                            mUCI.delay = k_uptime_get() + UCI_RESET_DELAY_MS;
+                            #endif
                         }
                     }
                     else if (inData[0] == 2)
                     {
+                        mUCI.online = true;
                         LOG_INF("UWB Device Active");
                         mUCI.uwb_state = UWB_ACTIVE;
                     }
@@ -232,6 +257,7 @@ static void uci_decode(
         break;
     case UCI_MT_RSP:
         mUCI.state = mUCI.nextstate;
+        mUCI.timeout_count = 0;
         switch (inGID)
         {
         case UCI_GID_CORE:
@@ -315,6 +341,17 @@ static int _UCItxCommand(void)
 
     require(remain >= 0, exit);
 
+#if DUMP_PROTO
+    uint8_t mt;
+    uint8_t gid;
+    uint8_t oid;
+
+    mt  = (header[0] & UCI_MT_MASK) >> UCI_MT_SHIFT;
+    gid = (header[0] & UCI_GID_MASK) >> UCI_GID_SHIFT;
+    oid = (header[1] & UCI_OID_MASK) >> UCI_OID_SHIFT;
+
+    uci_dump("TX->", mt, gid, oid, payload, remain);
+#endif
     do
     {
         chunk = remain - total;
@@ -434,9 +471,6 @@ int UCIprotoWrite(
 
     require((inCount + UCI_MSG_HDR_SIZE) < sizeof(mUCI.txbuf), exit);
 
-#if DUMP_PROTO
-    uci_dump("TX->", inType, inGID, inOID, inData, inCount);
-#endif
     header  = mUCI.txbuf;
     payload = mUCI.txbuf + UCI_MSG_HDR_SIZE;
 
@@ -526,10 +560,13 @@ int UCIprotoSlice(uint32_t *delay)
     {
     case UCI_BOOT:
         // wait for init state ntf from UWBS
+        mUCI.online = false;
+        mUCI.timeout_count = 0;
         break;
 
     case UCI_INIT:
         // send proprietary set-device state to nxp rhodes v4 and get respone
+        mUCI.online = false;
         mUCI.state = UCI_RX;
         mUCI.nextstate = UCI_OFFLINE;
         mUCI.cmd_start = k_uptime_get();
@@ -541,16 +578,30 @@ int UCIprotoSlice(uint32_t *delay)
 
     case UCI_OFFLINE:
         // wait for ok state ntf after proprietary init or reset was sent
+        mUCI.online = false;
+        mUCI.timeout_count = 0;
         *delay = 100;
         break;
 
     case UCI_RESET:
         // send a reset. when the ok status ntf comes back, it will set idle state
+        mUCI.online = false;
         mUCI.state = UCI_RX;
         mUCI.nextstate = UCI_OFFLINE;
         mUCI.cmd_start = k_uptime_get();
         data[0] = 0;
         ret = UCIprotoWrite(UCI_MT_CMD, UCI_GID_CORE, UCI_MSG_CORE_DEVICE_RESET, data, 1);
+        *delay = 2;
+        break;
+
+    case UCI_DELAY:
+        if (k_uptime_get() > mUCI.delay)
+        {
+            LOG_INF("Reset delay expired, go to idle");
+            mUCI.state = UCI_IDLE;
+            mUCI.delay = 0;
+        }
+        ret = 0;
         *delay = 2;
         break;
 
@@ -563,7 +614,14 @@ int UCIprotoSlice(uint32_t *delay)
         if (mUCI.txcnt > 0)
         {
             mUCI.state = UCI_RX;
-            mUCI.nextstate = UCI_IDLE;
+            if (mUCI.online)
+            {
+                mUCI.nextstate = UCI_IDLE;
+            }
+            else
+            {
+                mUCI.nextstate = UCI_OFFLINE;
+            }
             _UCItxCommand();
         }
         else
@@ -575,15 +633,30 @@ int UCIprotoSlice(uint32_t *delay)
         break;
 
     case UCI_RX:
-        now = k_uptime_get();
-        if ((now - mUCI.cmd_start) > UCI_RESP_TIMEOUT)
-        {
-            LOG_WRN("Resp timeout going to state %d", mUCI.nextstate);
-            mUCI.timeout_count++;
-            /* TODO - RESET? */
-            mUCI.state = mUCI.nextstate;
-        }
         *delay = 10;
+        now = k_uptime_get();
+        if ((now - mUCI.cmd_start) > UCI_RESP_TIMEOUT_MS)
+        {
+            mUCI.timeout_count++;
+            if (mUCI.timeout_count > UCI_MAX_TIMEOUTS)
+            {
+                LOG_WRN("Too many timeouts, resetting");
+                mUCI.timeout_count = 0;
+                mUCI.state = UCI_RESET;
+                mUCI.needs_reset = true;
+            }
+            else if (mUCI.txcnt)
+            {
+                LOG_WRN("Resp timeout, retry command");
+                mUCI.state = UCI_TX;
+            }
+            else
+            {
+                LOG_ERR("Why Rx if no Tx?");
+                mUCI.state = UCI_RESET;
+                mUCI.needs_reset = true;
+            }
+        }
         break;
 
     default:
@@ -606,6 +679,7 @@ int UCIprotoInit(bool inWarmStart)
     mUCI.max_packet = UCI_MAX_PAYLOAD_SIZE;
     mUCI.rxcnt = 0;
     mUCI.txcnt = 0;
+    mUCI.needs_reset = true;
 
     return ret;
 }

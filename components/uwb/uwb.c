@@ -1,3 +1,6 @@
+#include "uwb.h"
+#include "uwb_defs.h"
+#include "hbci_proto.h"
 #include "uci_proto.h"
 #include "uci_defs.h"
 #include "uci_ext_defs.h"
@@ -56,6 +59,8 @@ exit:
 int UWBSlice(uint32_t *delay)
 {
     int ret= 0;
+
+    ret = UCIprotoSlice(delay);
 //exit:
     return ret;
 }
@@ -63,8 +68,19 @@ int UWBSlice(uint32_t *delay)
 int UWBinit(void)
 {
     int ret = 0;
+    bool warmStart;
+
+    ret = NRFSPIinit();
+    require_noerr(ret, exit);
+
+    ret = HBCIprotoInit(&warmStart);
+    require_noerr(ret, exit);
+
+    ret = UCIprotoInit(warmStart);
+    require_noerr(ret, exit);
 
     mUWB.initialized = true;
+exit:
     return ret;
 }
 
