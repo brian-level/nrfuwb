@@ -45,6 +45,7 @@ set(APPLICATION_SRCS
   ${APPLICATION_DIR}/main.c
 )
 
+add_level_component(uwb)
 add_level_component(uci)
 add_level_component(hbci)
 add_level_component(nrfspi)

@@ -8,6 +8,7 @@
 #if CONFIG_BT
     #include "level_ble.h"
 #endif
+#include "timesvc.h"
 #include "crypto_platform.h"
 #include "uci_proto.h"
 #include "hbci_proto.h"
@@ -24,6 +25,9 @@ int main( void )
     uint32_t min_delay;
 
     ret = CryptoPlatformInit();
+    require_noerr(ret, exit);
+
+    ret = TimeInit();
     require_noerr(ret, exit);
 
     ret = NRFSPIinit();
@@ -60,7 +64,11 @@ int main( void )
             min_delay = delay;
         }
 
-        k_sleep(K_MSEC(min_delay));
+        // sleep for up-to min_delay.  Any events that need attention
+        // will call TimeSignalApplicationEvent causing this function
+        // to return immediately
+        //
+        TimeWaitApplicationEvent(min_delay);
     }
 
 exit:

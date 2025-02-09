@@ -1,4 +1,5 @@
 #include "nrfspi.h"
+#include "timesvc.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -23,45 +24,17 @@ typedef struct
 {
     bool                    initialized;
     int                     max_packet;
-    struct k_poll_signal    spi_done_sig;
     const struct device     *dev;
-    uint64_t                last_write;
-    uint32_t                txRequested;
     uint32_t                rxRequested;
     struct gpio_callback    irqCallback;
     struct spi_config       spi_cfg;
     const struct gpio_dt_spec *irq_gpio;
     const struct gpio_dt_spec *sync_gpio;
     const struct gpio_dt_spec *ce_gpio;
-    struct k_mutex          rxlock;
-    struct k_mutex          txlock;
-    uint8_t                 rxBuffer[SPI_PACKET_SIZE];
-    uint8_t                 txBuffer[SPI_PACKET_SIZE];
 }
 nrfspi_t;
 
 static nrfspi_t mSPI;
-
-// rx buffer is filled in worker thread triggered by ISR and
-// read by reader thread so serialize access
-//
-#define NRFSPI_RXRING_LOCK()      \
-    k_mutex_lock( &nrfspi->rxlock, K_FOREVER )
-
-#define NRFSPI_RXRING_UNLOCK()    \
-    k_mutex_unlock( &nrfspi->rxlock )
-
-// writes can come from multiple threads, so make sure txbuffer is
-// is only used by one at a time
-//
-#define NRFSPI_TX_LOCK()      \
-    k_mutex_lock( &nrfspi->txlock, K_FOREVER )
-
-#define NRFSPI_TX_UNLOCK()    \
-    k_mutex_unlock( &nrfspi->txlock )
-
-#define NRFSPI_TX_ISLOCKED()  \
-    (nrfspi->txlock.lock_count != 0)
 
 static int _nrfspi_trx(
                     nrfspi_t *nrfspi,
@@ -70,7 +43,7 @@ static int _nrfspi_trx(
                     uint8_t *rxdata,
                     const int rxsize)
 {
-    int ret = 0;
+    int ret;
 
     struct spi_buf rx_buf[1];
     struct spi_buf_set rx;
@@ -84,16 +57,13 @@ static int _nrfspi_trx(
     rx.buffers = rx_buf;
     rx.count = rxdata ? 1 : 0;
 
-    tx_buf[0].buf = txdata;
+    tx_buf[0].buf = (uint8_t*)txdata;
     tx_buf[0].len = txcount;
 
     tx.buffers = tx_buf;
     tx.count = txdata ? 1 : 0;
 
     ret = spi_transceive(nrfspi->dev, &nrfspi->spi_cfg, &tx, &rx);
-
-    gpio_pin_configure_dt(nrfspi->sync_gpio, GPIO_OUTPUT_INACTIVE);
-
     return ret;
 }
 
@@ -113,6 +83,9 @@ static void _host_irq_callback(const struct device *dev,
     // disable host int for a bit
     gpio_pin_interrupt_configure_dt(nrfspi->irq_gpio, GPIO_INT_DISABLE);
 
+    // signal any waiter to wake up
+    TimeSignalApplicationEvent();
+
 }
 
 static const struct spi_cs_control mspi_cs =
@@ -125,9 +98,9 @@ static const struct spi_cs_control mspi_cs =
 
 #define IPC_GPIO_NODE DT_PATH(gpio)
 
-static const struct gpio_dt_spec mspi_irq = GPIO_DT_SPEC_GET(DT_NODELABEL(uwb_spi_irq), gpios);
+static const struct gpio_dt_spec mspi_irq  = GPIO_DT_SPEC_GET(DT_NODELABEL(uwb_spi_irq), gpios);
 static const struct gpio_dt_spec mspi_sync = GPIO_DT_SPEC_GET(DT_NODELABEL(uwb_spi_sync), gpios);
-static const struct gpio_dt_spec mspi_ce = GPIO_DT_SPEC_GET(DT_NODELABEL(uwb_spi_ce), gpios);
+static const struct gpio_dt_spec mspi_ce   = GPIO_DT_SPEC_GET(DT_NODELABEL(uwb_spi_ce), gpios);
 
 /*
 The time required for the module to go into DPD state is < 100 µs controlled by the firmware.
@@ -139,7 +112,7 @@ around 380 µs.
 
 static int _nrfspi_init(nrfspi_t *nrfspi)
 {
-    int ret = -1;
+    int ret = -ENODEV;
 
     memcpy(&nrfspi->spi_cfg.cs, &mspi_cs, sizeof(mspi_cs));
     nrfspi->spi_cfg.frequency = DT_PROP(SPI1_NODE, spi_max_frequency);
@@ -187,7 +160,6 @@ static int _nrfspi_init(nrfspi_t *nrfspi)
         if (state)
         {
             uint8_t junk[32];
-            int c;
 
             nrfspi->rxRequested = 1;
             NRFSPIread(junk, sizeof(junk), true);
@@ -210,11 +182,8 @@ static int _nrfspi_init(nrfspi_t *nrfspi)
     ret = gpio_add_callback(nrfspi->irq_gpio->port, &nrfspi->irqCallback);
     require_noerr(ret, exit);
 
-    nrfspi->txRequested = 0;
     nrfspi->rxRequested = 0;
-
     ret = 0;
-
 exit:
     return ret;
 }
@@ -225,9 +194,13 @@ int NRFSPIread(
                 bool inUseSync)
 {
     nrfspi_t *nrfspi = &mSPI;
-    int ret = -1;
+    int ret = -EINVAL;
     int xret;
 
+    require(outRxData, exit);
+    require(inRxSize, exit);
+
+    ret = -ENODEV;
     require(nrfspi->initialized, exit);
 
     if (inUseSync)
@@ -237,7 +210,7 @@ int NRFSPIread(
         require_noerr(xret, exit);
     }
 
-    // write what we want to tx
+    // read the data
     ret = _nrfspi_trx(nrfspi, NULL, 0, outRxData, inRxSize);
 
     if (inUseSync)
@@ -258,8 +231,12 @@ int NRFSPIwrite(
                 const int inTxCount)
 {
     nrfspi_t *nrfspi = &mSPI;
-    int ret;
+    int ret = -EINVAL;
 
+    require(inTxData, exit);
+    require(inTxCount, exit);
+
+    ret = -ENODEV;
     require(nrfspi->initialized, exit);
 
     // write what we want to tx
@@ -270,7 +247,7 @@ exit:
 
 int NRFSPIpoll(bool *outReadable)
 {
-    int ret = -1;
+    int ret = -EINVAL;
 
     require(outReadable, exit);
     *outReadable = mSPI.rxRequested > 0;
@@ -298,23 +275,16 @@ void NRFSPIdeinit(void)
 int NRFSPIinit(void)
 {
     nrfspi_t *nrfspi;
-    int ret = -1;
+    int ret = -ENODEV;
 
     nrfspi = &mSPI;
 
     if (!nrfspi->initialized)
     {
-        k_poll_signal_init(&nrfspi->spi_done_sig);
-
         nrfspi->dev = DEVICE_DT_GET(SPI_DEV_NODE);
         require(nrfspi->dev, exit);
 
         require(device_is_ready(nrfspi->dev), exit);
-
-        ret = k_mutex_init(&nrfspi->rxlock);
-        require_noerr(ret, exit);
-        ret = k_mutex_init(&nrfspi->txlock);
-        require_noerr(ret, exit);
 
         nrfspi->initialized = true;
         nrfspi->max_packet = 255;
