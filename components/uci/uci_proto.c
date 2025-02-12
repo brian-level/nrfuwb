@@ -12,7 +12,10 @@
 #include "Logging.h"
 
 // Define this non-0 to dump protocol bytes
-#define DUMP_PROTO 1
+#define DUMP_PROTO (1)
+
+// Define this non-0 to decode protocol in dump (else raw bytes)
+#define DUMP_DECODE_PROTO (0)
 
 // wait this long after reset to start commands, even when
 // uwbs stays its ok,  it doesn't really respond to the first command
@@ -22,7 +25,7 @@
 
 // give uwbs this many millisecs to respond before re-trying
 //
-#define UCI_RESP_TIMEOUT_MS (60)
+#define UCI_RESP_TIMEOUT_MS (100)
 
 // after this many timeouts, reset the connnection
 //
@@ -50,8 +53,6 @@ static struct
 
     bool    online;
     bool    needs_reset;
-    bool    got_dev_info;
-    bool    got_cap_info;
 
     uint64_t delay;
     uint64_t cmd_start;
@@ -65,7 +66,9 @@ static struct
 }
 mUCI;
 
-static void uci_dump(
+#if DUMP_PROTO
+#if DUMP_PROTO_DECODE
+static void _uci_dump(
                 const char *inBlurb,
                 uint8_t inType,
                 uint8_t inGID,
@@ -88,6 +91,7 @@ static void uci_dump(
     case UCI_IDLE:      statestr = "IDLE"; break;
     case UCI_TX:        statestr = "TX"; break;
     case UCI_RX:        statestr = "RX"; break;
+    case UCI_DELAY:     statestr = "DELAY"; break;
     default:            statestr = "????"; break;
     }
 
@@ -154,6 +158,41 @@ static void uci_dump(
     }
 }
 
+#else
+
+static char dump_buf[256 * 4];
+
+static void _uci_dump_raw(
+                const uint8_t *inData,
+                const int inCount,
+                char *outBuf,
+                const int outSize)
+{
+    int index;
+    int totlen;
+    int len;
+
+    require(inData && outBuf, exit);
+
+    for (index = totlen = 0; index < inCount && totlen < outSize; index++)
+    {
+        len = snprintf(outBuf + totlen, outSize - totlen, "%02X ", inData[index]);
+        if (len > 0)
+        {
+            totlen += len;
+        }
+        else
+        {
+            break;
+        }
+    }
+exit:
+    return;
+}
+
+#endif
+#endif
+
 static void uci_decode(
                 uint8_t inType,
                 uint8_t inGID,
@@ -180,6 +219,7 @@ static void uci_decode(
                         // NXP proprietary use of device status 0 as
                         // "init, ready to get a proprietary init sequence"
                         //
+                        mUCI.uwb_state = UWB_INACTIVE;
                         if (mUCI.state == UCI_BOOT)
                         {
                             LOG_INF("UWB Device Status Init, Booting");
@@ -192,6 +232,7 @@ static void uci_decode(
                         LOG_INF("UWB Device Ready");
 
                         mUCI.online = true;
+                        mUCI.uwb_state = UWB_INACTIVE;
                         if (mUCI.state == UCI_OFFLINE)
                         {
                             #if 1
@@ -269,15 +310,8 @@ static void uci_decode(
                 mUCI.txcnt = 0;
                 break;
             case UCI_MSG_CORE_DEVICE_STATUS_NTF:
-                break;
             case UCI_MSG_CORE_DEVICE_INFO:
-                mUCI.got_dev_info = true;
-                mUCI.txcnt = 0;
-                break;
             case UCI_MSG_CORE_GET_CAPS_INFO:
-                mUCI.got_cap_info = true;
-                mUCI.txcnt = 0;
-                break;
             case UCI_MSG_CORE_SET_CONFIG:
             case UCI_MSG_CORE_GET_CONFIG:
             case UCI_MSG_CORE_DEVICE_SUSPEND:
@@ -289,6 +323,7 @@ static void uci_decode(
                 mUCI.txcnt = 0;
                 break;
             case UCI_MSG_CORE_QUERY_UWBS_TIMESTAMP:
+                break;
             default:
                 break;
             }
@@ -297,6 +332,7 @@ static void uci_decode(
         case UCI_GID_RANGE_MANAGE:
         case UCI_GID_DATA_CONTROL:
         case UCI_GID_TEST:
+            mUCI.txcnt = 0;
             break;
         case UCI_GID_PROPRIETARY:
             if (inOID == EXT_UCI_MSG_CORE_DEVICE_INIT)
@@ -317,6 +353,7 @@ static void uci_decode(
         case UCI_GID_INTERNAL_GROUP:
         case UCI_GID_INTERNAL:
         default:
+            mUCI.txcnt = 0;
             break;
         }
         break;
@@ -334,6 +371,9 @@ static int _UCItxCommand(void)
     uint8_t *header;
     uint8_t *payload;
 
+    // make sure reply is countable
+    mUCI.rxcnt = 0;
+
     header = mUCI.txbuf;
     payload = mUCI.txbuf + UCI_MSG_HDR_SIZE;
     total = 0;
@@ -341,7 +381,17 @@ static int _UCItxCommand(void)
 
     require(remain >= 0, exit);
 
+    // set response timeout time stamp
+    mUCI.cmd_start = k_uptime_get();
+
+    // wait for reply (with timeout) in rx state and
+    // go back to idle when uwbs responds
+    //
+    mUCI.state = UCI_RX;
+    mUCI.nextstate = UCI_IDLE;
+
 #if DUMP_PROTO
+#if DUMP_DECODE_PROTO
     uint8_t mt;
     uint8_t gid;
     uint8_t oid;
@@ -350,7 +400,11 @@ static int _UCItxCommand(void)
     gid = (header[0] & UCI_GID_MASK) >> UCI_GID_SHIFT;
     oid = (header[1] & UCI_OID_MASK) >> UCI_OID_SHIFT;
 
-    uci_dump("TX->", mt, gid, oid, payload, remain);
+    _uci_dump("TX->", mt, gid, oid, payload, remain);
+#else
+    _uci_dump_raw(mUCI.txbuf, mUCI.txcnt, dump_buf, sizeof(dump_buf));
+    LOG_PRINTK("NXPUCIX => %s\n", dump_buf);
+#endif
 #endif
     do
     {
@@ -398,33 +452,29 @@ int UCIprotoRead(
     uint8_t header[4];
     int payload_length;
     uint8_t frag;
+    uint8_t type;
+    uint8_t gid;
+    uint8_t oid;
 
+    require(outType && outGID && outOID && outCount, exit);
     require(outData, exit);
     require(inSize > 0, exit);
 
     // read header
-    ret = NRFSPIread(header, sizeof(header), true);
+    ret = NRFSPIstartSync();
+    ret = NRFSPIread(header, sizeof(header));
     require_noerr(ret, exit);
 
-    if (outType)
-    {
-        *outType = (header[0] & UCI_MT_MASK) >> UCI_MT_SHIFT;
-    }
+    type = (header[0] & UCI_MT_MASK) >> UCI_MT_SHIFT;
+    *outType = type;
 
-    if (outGID)
-    {
-        *outGID = (header[0] & UCI_GID_MASK) >> UCI_GID_SHIFT;
-    }
+    gid = (header[0] & UCI_GID_MASK) >> UCI_GID_SHIFT;
+    *outGID = gid;
 
-    if (outOID)
-    {
-        *outOID = (header[1] & UCI_OID_MASK) >> UCI_OID_SHIFT;
-    }
+    oid = (header[1] & UCI_OID_MASK) >> UCI_OID_SHIFT;
+    *outOID = oid;
 
-    if (outCount)
-    {
-        *outCount = 0;
-    }
+    *outCount = 0;
 
     frag = header[0] & UCI_PBF_MASK;
     payload_length = header[3];
@@ -437,14 +487,48 @@ int UCIprotoRead(
 
     require(payload_length <= inSize, exit);
 
-    ret = NRFSPIread(outData, payload_length, true);
-    require_noerr(ret, exit);
-
-    if (outCount)
+    if (payload_length > 0)
     {
-        *outCount = payload_length;
+        // read payload
+        ret = NRFSPIread(outData, payload_length);
+        require_noerr(ret, exit);
     }
 
+    *outCount = payload_length;
+
+#if DUMP_PROTO
+#if DUMP_DECODE_PROTO
+    _uci_dump("<-RX", type, gid, oid, mUCI.rxbuf, count);
+#else
+    int dl = snprintf(dump_buf, sizeof(dump_buf), "%02X %02X %02X %02X ",
+                header[0], header[1], header[2], header[3]);
+    if (payload_length)
+    {
+        _uci_dump_raw(outData, payload_length, dump_buf + dl, sizeof(dump_buf) - dl);
+    }
+    LOG_PRINTK("NXPUCIR <= %s\n", dump_buf);
+#endif
+#endif
+exit:
+    ret = NRFSPIstopSync();
+    return ret;
+}
+
+int UCIprotoWriteRaw(
+                const uint8_t *inData,
+                const int inCount)
+{
+    int ret = -EINVAL;
+
+    require(mUCI.state == UCI_IDLE, exit);
+    require(inData, exit);
+    require(inCount >= UCI_MSG_HDR_SIZE, exit);
+    require(inCount <= sizeof(mUCI.txbuf), exit);
+
+    memcpy(mUCI.txbuf, inData, inCount);
+    mUCI.txcnt = inCount;
+
+    ret = _UCItxCommand();
 exit:
     return ret;
 }
@@ -491,47 +575,29 @@ exit:
     return ret;
 }
 
-static int _UCIidleProcess(void)
+int UCIprotoSlice(
+                bool *outHaveMessage,
+                uint8_t *outType,
+                uint8_t *outGID,
+                uint8_t *outOID,
+                uint8_t **outPayload,
+                int *outPayloadLength,
+                uint32_t *delay)
 {
     int ret = -EINVAL;
-
-    require(mUCI.state == UCI_IDLE, exit);
-
-    if (mUCI.needs_reset)
-    {
-        mUCI.state = UCI_RESET;
-        mUCI.nextstate = UCI_RESET;
-    }
-    else if (!mUCI.got_dev_info)
-    {
-        mUCI.state = UCI_RX;
-        mUCI.nextstate = UCI_IDLE;
-        mUCI.cmd_start = k_uptime_get();
-        // send get-device-info
-        ret = UCIprotoWrite(UCI_MT_CMD, UCI_GID_CORE, UCI_MSG_CORE_DEVICE_INFO, NULL, 0);
-    }
-    else if (!mUCI.got_cap_info)
-    {
-        mUCI.state = UCI_RX;
-        mUCI.nextstate = UCI_IDLE;
-        mUCI.cmd_start = k_uptime_get();
-        // send get-cap-info
-        ret = UCIprotoWrite(UCI_MT_CMD, UCI_GID_CORE, UCI_MSG_CORE_GET_CAPS_INFO, NULL, 0);
-    }
-    else
-    {
-        ret = 0;
-    }
-exit:
-    return ret;
-}
-
-int UCIprotoSlice(uint32_t *delay)
-{
-    int ret = 0;
     bool readable;
     uint8_t data[32];
     uint64_t now;
+
+    require(outHaveMessage && outType && outGID && outOID, exit);
+    require(outPayload && outPayloadLength && delay, exit);
+
+    *outHaveMessage = false;
+    *outType = 0xFF;
+    *outGID = 0;
+    *outOID = 0;
+    *outPayload = NULL;
+    *outPayloadLength = 0;
 
     ret = NRFSPIpoll(&readable);
     require_noerr(ret, exit);
@@ -544,14 +610,24 @@ int UCIprotoSlice(uint32_t *delay)
         uint8_t oid;
 
         ret = UCIprotoRead(&type, &gid, &oid, mUCI.rxbuf, sizeof(mUCI.rxbuf), &count);
-
-        if (ret >= 0)
+        if (!ret)
         {
             mUCI.timeout_count = 0;
-#if DUMP_PROTO
-            uci_dump("<-RX", type, gid, oid, mUCI.rxbuf, count);
-#endif
+            mUCI.rxcnt = count;
+
+            // advance our state depending upon response/notification
+            //
             uci_decode(type, gid, oid, mUCI.rxbuf, count);
+
+            *outHaveMessage = true;
+            *outType = type;
+            *outGID = gid;
+            *outOID = oid;
+            *outPayload = mUCI.rxbuf;
+            *outPayloadLength = mUCI.rxcnt;
+
+            // dont ever look at this reply again
+            mUCI.rxcnt = 0;
             ret = 0;
         }
     }
@@ -567,12 +643,10 @@ int UCIprotoSlice(uint32_t *delay)
     case UCI_INIT:
         // send proprietary set-device state to nxp rhodes v4 and get respone
         mUCI.online = false;
-        mUCI.state = UCI_RX;
-        mUCI.nextstate = UCI_OFFLINE;
-        mUCI.cmd_start = k_uptime_get();
         data[0] = 0x73;
         data[1] = 0x04;
         ret = UCIprotoWrite(UCI_MT_CMD, UCI_GID_PROPRIETARY, EXT_UCI_MSG_CORE_DEVICE_INIT, data, 2);
+        mUCI.nextstate = UCI_OFFLINE;
         *delay = 2;
         break;
 
@@ -586,11 +660,9 @@ int UCIprotoSlice(uint32_t *delay)
     case UCI_RESET:
         // send a reset. when the ok status ntf comes back, it will set idle state
         mUCI.online = false;
-        mUCI.state = UCI_RX;
-        mUCI.nextstate = UCI_OFFLINE;
-        mUCI.cmd_start = k_uptime_get();
         data[0] = 0;
         ret = UCIprotoWrite(UCI_MT_CMD, UCI_GID_CORE, UCI_MSG_CORE_DEVICE_RESET, data, 1);
+        mUCI.nextstate = UCI_OFFLINE;
         *delay = 2;
         break;
 
@@ -606,23 +678,29 @@ int UCIprotoSlice(uint32_t *delay)
         break;
 
     case UCI_IDLE:
-        ret = _UCIidleProcess();
-        *delay = 100;
+        ret = 0;
+        if (mUCI.needs_reset)
+        {
+            mUCI.state = UCI_RESET;
+            mUCI.nextstate = UCI_RESET;
+            *delay = 0;
+        }
+        else
+        {
+            *delay = 100;
+        }
         break;
 
     case UCI_TX: /* retransmit */
         if (mUCI.txcnt > 0)
         {
-            mUCI.state = UCI_RX;
-            if (mUCI.online)
+            ret = _UCItxCommand();
+
+            if (!mUCI.online)
             {
-                mUCI.nextstate = UCI_IDLE;
-            }
-            else
-            {
+                // if haven't got ok ntf yet, go back offline on rsp
                 mUCI.nextstate = UCI_OFFLINE;
             }
-            _UCItxCommand();
         }
         else
         {
@@ -633,7 +711,6 @@ int UCIprotoSlice(uint32_t *delay)
         break;
 
     case UCI_RX:
-        *delay = 10;
         now = k_uptime_get();
         if ((now - mUCI.cmd_start) > UCI_RESP_TIMEOUT_MS)
         {
@@ -667,20 +744,34 @@ exit:
     return ret;
 }
 
+bool UCIready(void)
+{
+    return mUCI.online && mUCI.state == UCI_IDLE;
+}
+
 int UCIprotoInit(bool inWarmStart)
 {
     int ret = 0;
 
     memset(&mUCI, 0, sizeof(mUCI));
 
-    mUCI.state = inWarmStart ? UCI_INIT : UCI_BOOT;
+    inWarmStart = true;
+
+    if (inWarmStart)
+    {
+        mUCI.state = UCI_IDLE;
+        mUCI.online = true;
+    }
+    else
+    {
+        mUCI.needs_reset = true;
+        mUCI.state = UCI_BOOT;
+    }
     mUCI.nextstate = UCI_INIT;
     mUCI.timeout_count = 0;
     mUCI.max_packet = UCI_MAX_PAYLOAD_SIZE;
     mUCI.rxcnt = 0;
     mUCI.txcnt = 0;
-    mUCI.needs_reset = true;
-
     return ret;
 }
 

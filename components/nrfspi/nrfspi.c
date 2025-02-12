@@ -23,6 +23,7 @@
 typedef struct
 {
     bool                    initialized;
+    bool                    enabled;
     int                     max_packet;
     const struct device     *dev;
     uint32_t                rxRequested;
@@ -110,6 +111,24 @@ state is around 370 µs, the wakeup from HPD state is triggered once CE is assert
 around 380 µs.
 */
 
+/*
+ * From NXP code
+
+    masterConfig.baudRate_Bps = UWB_SPI_BAUDRATE;           // 8MHx
+    masterConfig.dataWidth    = kSPI_Data8Bits;             // 8 bit
+    masterConfig.polarity     = kSPI_ClockPolarityActiveHigh;// CPOL=0
+    masterConfig.phase        = kSPI_ClockPhaseFirstEdge;   // CPHA=0
+    masterConfig.direction    = kSPI_MsbFirst;              //
+
+    masterConfig.delayConfig.preDelay      = 15U;
+    masterConfig.delayConfig.postDelay     = 15U;
+    masterConfig.delayConfig.frameDelay    = 15U;
+    masterConfig.delayConfig.transferDelay = 15U;
+
+    masterConfig.sselPol = kSPI_SpolActiveAllLow;           //
+    masterConfig.sselNum = UWB_SPI_SSEL;
+*/
+
 static int _nrfspi_init(nrfspi_t *nrfspi)
 {
     int ret = -ENODEV;
@@ -121,7 +140,9 @@ static int _nrfspi_init(nrfspi_t *nrfspi)
     nrfspi->sync_gpio = &mspi_sync;
     nrfspi->ce_gpio = &mspi_ce;
 
-    nrfspi->spi_cfg.operation = SPI_WORD_SET(8) | SPI_TRANSFER_MSB; // | SPI_MODE_CPOL | SPI_MODE_CPHA;
+    nrfspi->spi_cfg.cs.delay = 15;
+
+    nrfspi->spi_cfg.operation = SPI_WORD_SET(8) | SPI_TRANSFER_MSB;
     nrfspi->spi_cfg.operation |= SPI_OP_MODE_MASTER;
 
     // de-assert sync
@@ -137,6 +158,7 @@ static int _nrfspi_init(nrfspi_t *nrfspi)
     // delay a bit to reset chip
     k_sleep(K_USEC(400));
 
+#if 0
     // enable chip
     ret = gpio_pin_configure_dt(nrfspi->ce_gpio, GPIO_OUTPUT_ACTIVE);
 
@@ -162,7 +184,7 @@ static int _nrfspi_init(nrfspi_t *nrfspi)
             uint8_t junk[32];
 
             nrfspi->rxRequested = 1;
-            NRFSPIread(junk, sizeof(junk), true);
+            NRFSPIread(junk, sizeof(junk));
             k_sleep(K_MSEC(1));
         }
     }
@@ -175,12 +197,14 @@ static int _nrfspi_init(nrfspi_t *nrfspi)
         ret = -EIO;
         goto exit;
     }
-
+#endif
     gpio_pin_interrupt_configure_dt(nrfspi->irq_gpio, GPIO_INT_EDGE_TO_ACTIVE);
 
     gpio_init_callback(&nrfspi->irqCallback, _host_irq_callback, BIT(nrfspi->irq_gpio->pin));
     ret = gpio_add_callback(nrfspi->irq_gpio->port, &nrfspi->irqCallback);
     require_noerr(ret, exit);
+
+    NRFSPIenableChip(0);
 
     nrfspi->rxRequested = 0;
     ret = 0;
@@ -190,12 +214,10 @@ exit:
 
 int NRFSPIread(
                 uint8_t *outRxData,
-                int inRxSize,
-                bool inUseSync)
+                int inRxSize)
 {
     nrfspi_t *nrfspi = &mSPI;
     int ret = -EINVAL;
-    int xret;
 
     require(outRxData, exit);
     require(inRxSize, exit);
@@ -203,22 +225,8 @@ int NRFSPIread(
     ret = -ENODEV;
     require(nrfspi->initialized, exit);
 
-    if (inUseSync)
-    {
-        // raise sync to allow reading
-        xret = gpio_pin_configure_dt(nrfspi->sync_gpio, GPIO_OUTPUT_ACTIVE);
-        require_noerr(xret, exit);
-    }
-
     // read the data
     ret = _nrfspi_trx(nrfspi, NULL, 0, outRxData, inRxSize);
-
-    if (inUseSync)
-    {
-        // raise sync to allow reading
-        xret = gpio_pin_configure_dt(nrfspi->sync_gpio, GPIO_OUTPUT_INACTIVE);
-        require_noerr(xret, exit);
-    }
 
 exit:
     nrfspi->rxRequested = 0;
@@ -245,12 +253,127 @@ exit:
     return ret;
 }
 
+int NRFSPIenableChip(bool enable)
+{
+    int ret;
+    nrfspi_t *nrfspi = &mSPI;
+
+    ret = gpio_pin_configure_dt(nrfspi->ce_gpio, enable ? GPIO_OUTPUT_ACTIVE : GPIO_OUTPUT_INACTIVE);
+
+    mSPI.enabled = enable;
+    if (enable)
+    {
+        gpio_pin_interrupt_configure_dt(nrfspi->irq_gpio, GPIO_INT_EDGE_TO_ACTIVE);
+    }
+    else
+    {
+        gpio_pin_interrupt_configure_dt(nrfspi->irq_gpio, GPIO_INT_DISABLE);
+    }
+    return ret;
+}
+
+int NRFSPIstartSync(void)
+{
+    int ret;
+    nrfspi_t *nrfspi = &mSPI;
+    volatile int irq_state;
+    int timeout;
+
+    // raise sync to allow reading
+    ret = gpio_pin_configure_dt(nrfspi->sync_gpio, GPIO_OUTPUT_ACTIVE);
+    require_noerr(ret, exit);
+
+    // wait for uwbs to drop irq line so we know its preparing rx data
+    //
+    timeout = 0;
+    do
+    {
+        irq_state = gpio_pin_get_dt(nrfspi->irq_gpio);
+
+        if (irq_state)
+        {
+            k_sleep(K_USEC(20));
+            timeout += 20;
+        }
+    }
+    while (irq_state && timeout < 1000);
+
+    if (irq_state)
+    {
+        LOG_ERR("UWBS not read-ready");
+        ret = -ETIMEDOUT;
+        goto exit;
+    }
+
+    // now wait for uwbs to raise irq line so we know its ready to xfer
+    //
+    timeout = 0;
+    do
+    {
+        irq_state = gpio_pin_get_dt(nrfspi->irq_gpio);
+
+        if (!irq_state)
+        {
+            k_sleep(K_USEC(20));
+            timeout += 20;
+        }
+    }
+    while (!irq_state && timeout < 1000);
+
+    if (!irq_state)
+    {
+        LOG_ERR("UWBS not read-ready (2)");
+        ret = -ETIMEDOUT;
+        goto exit;
+    }
+
+    ret = 0;
+
+exit:
+    return ret;
+}
+
+int NRFSPIstopSync(void)
+{
+    int ret;
+    nrfspi_t *nrfspi = &mSPI;
+
+    // lower sync
+    ret = gpio_pin_configure_dt(nrfspi->sync_gpio, GPIO_OUTPUT_INACTIVE);
+    return ret;
+}
+
 int NRFSPIpoll(bool *outReadable)
 {
     int ret = -EINVAL;
+    nrfspi_t *nrfspi;
+
+    nrfspi = &mSPI;
 
     require(outReadable, exit);
-    *outReadable = mSPI.rxRequested > 0;
+
+    if (nrfspi->enabled)
+    {
+        if (nrfspi->rxRequested == 0)
+        {
+            // its possible another interrupt happened while we had it
+            // disabled during reading, so poll the irq line here
+            //
+            int irq_state = gpio_pin_get_dt(nrfspi->irq_gpio);
+
+            if (irq_state)
+            {
+                nrfspi->rxRequested = 1;
+                TimeSignalApplicationEvent();
+            }
+        }
+
+        *outReadable = nrfspi->rxRequested > 0;
+    }
+    else
+    {
+        *outReadable = false;
+    }
     ret = 0;
 exit:
     return ret;

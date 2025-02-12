@@ -13,7 +13,6 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
-#include "ipcmsg_def.h"
 
 /// external representation of a ble connection for use by
 /// any other subsystem this interacts with
@@ -52,6 +51,9 @@ typedef const void *ble_conn_handle_t;
 #define RESPONSE_CHARACTERISTIC_UUID    0xFB, 0x34, 0x9B, 0x5F, 0x80, 0x00, 0x00, 0x80, 0x00, 0x10, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00
 #define BT_UUID_RESPONSE   BT_UUID_DECLARE_128(RESPONSE_CHARACTERISTIC_UUID)
 
+#define UWBRX_CHARACTERISTIC_UUID    0xFB, 0x34, 0x9B, 0x5F, 0x80, 0x00, 0x00, 0x80, 0x00, 0x10, 0x00, 0x00, 0x22, 0x00, 0x00, 0x00
+#define BT_UUID_UWBRX  BT_UUID_DECLARE_128(UWBRX_CHARACTERISTIC_UUID)
+
 typedef enum
 {
     BT_DATA_TYPE_NONE       = 0,
@@ -59,12 +61,6 @@ typedef enum
     BT_DATA_TYPE_OTA        = 2     ///< raw OTA IPC data
 }
 ble_data_type_t;
-
-typedef const char *(*ble_sys_status_getter_t)(char *inBuffer, size_t inBufferSize);
-typedef const int   (*ble_connect_callback_t)(ble_conn_handle_t in_conn, const uint16_t inMTU, const bool isConnected);
-typedef const int   (*ble_rxdata_callback_t)(ble_conn_handle_t in_conn, const ble_data_type_t inDataType, const uint8_t *inData, const size_t inDataLen);
-typedef const int   (*ble_mtu_update_callback_t)(ble_conn_handle_t in_conn, const uint16_t inMTU);
-typedef int         (*ble_ipc_receiver_t)(ipc_msg_msg_t *inMsg);
 
 // connection
 //
@@ -74,20 +70,7 @@ bool    BLEisShellEnabled(void);
 int     BLEslice(uint32_t *outDelay);
 int     BLEinit(const char *in_device_name);
 
-int     BLEwriteResponseCharacteristic(ble_conn_handle_t in_conn, const uint8_t *const inData, const size_t inDataLen);
-int     BLEsendIPCmessage(const ipc_msg_msg_t *inSubMsg);
-int     BLEsetIPCrxCallback(ble_ipc_receiver_t inRx);
-int     BLEsetDelegate(
-                        ble_connect_callback_t    inConnectCallback,
-                        ble_rxdata_callback_t     inRxDataCallback,
-                        ble_mtu_update_callback_t inMTUupdateCallback
-                        );
-
-#if defined(CONFIG_BT) && defined(LEVEL_BT_SECURE)
-SessionOwner_t* BLEGetCurrentSession(void);
-
-void    BLESetCurrentSession(SessionOwner_t *inSession);
-#endif
+int     BLEwriteUWBCharacteristic(ble_conn_handle_t in_conn, const uint8_t *const inData, const size_t inDataLen);
 
 // advertising
 //

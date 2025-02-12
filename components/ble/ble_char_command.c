@@ -46,11 +46,13 @@ ssize_t BLEinternalWriteCommand(
 
     if (len > 0)
     {
+        /*
         if (mBLE.rxdataCallback)
         {
             //printk("ble sending %u to callback %p\n", len, mBLE.rxdataCallback);
             mBLE.rxdataCallback(conn, BT_DATA_TYPE_SESSION, buf, len);
         }
+        */
     }
 
 exit:
@@ -90,11 +92,13 @@ ssize_t BLEinternalWriteDFUrx(
 
     if (len > 0)
     {
+        /*
         if (mBLE.rxdataCallback)
         {
             //printk("ble sending %u DFU data to callback %p\n", len, mBLE.rxdataCallback);
             mBLE.rxdataCallback(conn, BT_DATA_TYPE_OTA, buf, len);
         }
+        */
     }
 
 exit:
@@ -116,10 +120,12 @@ ssize_t BLEinternalReadStatus(
     bleconn = BLEinternalConnectionOf(conn);
     require(bleconn, exit);
 
+    /*
     if (mBLE.statusGetter)
     {
         mBLE.statusGetter(foo, sizeof(foo));
     }
+    */
 
     if (!bleconn->unlocked)
     {

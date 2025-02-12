@@ -24,7 +24,6 @@ typedef struct
     bool            unlocked;
     struct k_sem    notify_sem;
     bool            hasTxMsg;
-    ipc_msg_msg_t   txmsg;
 }
 ble_conn_context_t;
 
@@ -38,11 +37,6 @@ typedef struct
     bool        is_advertising;
     uint32_t    adv_stop_time;
     bool        shell_inited;
-
-    ble_sys_status_getter_t     statusGetter;
-    ble_connect_callback_t      connectCallback;
-    ble_rxdata_callback_t       rxdataCallback;
-    ble_mtu_update_callback_t   mtuUpdateCallback;
 
     ble_conn_context_t connections[BT_MAX_CONCURRENT];
 }
@@ -136,6 +130,8 @@ ssize_t BLEinternalReadSettingValue(
                             uint16_t offset
                        );
 
+// UWB data
+
 ssize_t BLEinternalWriteUWB(
                             struct bt_conn *conn,
                             const struct bt_gatt_attr *attr,
@@ -152,5 +148,12 @@ ssize_t BLEinternalReadUWB(
                             uint16_t len,
                             uint16_t offset
                        );
+int BLEinternalNotifyUWB(
+                            struct bt_conn *conn,
+                            void *buf,
+                            uint16_t len
+                       );
 int BLECharSettingsInit(const struct bt_gatt_attr *in_attr);
+
+int BLECharUWBInit(const struct bt_gatt_attr *in_attr);
 

@@ -8,13 +8,16 @@
 #if CONFIG_BT
     #include "level_ble.h"
 #endif
+#include "nearby_interaction.h"
 #include "timesvc.h"
 #include "crypto_platform.h"
-#include "uwb.h"
 
 int main( void )
 {
     int ret;
+    #if CONFIG_BT
+    bool ble_started = false;
+    #endif
 
     LOG_INF("NRF UWB Device");
 
@@ -27,13 +30,9 @@ int main( void )
     ret = TimeInit();
     require_noerr(ret, exit);
 
-    ret = UWBinit();
+    ret = NIinit();
     require_noerr(ret, exit);
 
-#if CONFIG_BT
-    ret = BLEinit(CONFIG_BT_DEVICE_NAME);
-    require_noerr(ret, exit);
-#endif
     // Run the application
     //
     while (true)
@@ -41,19 +40,33 @@ int main( void )
         delay = 200;
         min_delay = delay;
 
-        #if CONFIG_BT
-        ret = BLEslice(&delay);
-        if (delay < min_delay)
-        {
-            min_delay = delay;
-        }
-        #endif
-
         ret = UWBSlice(&delay);
         if (delay < min_delay)
         {
             min_delay = delay;
         }
+
+        #if CONFIG_BT
+        if (UWBReady())
+        {
+            /*
+            if (!ble_started)
+            {
+                ret = BLEinit(CONFIG_BT_DEVICE_NAME);
+                require_noerr(ret, exit);
+                ble_started = true;
+            }
+            else
+            {
+                ret = BLEslice(&delay);
+                if (delay < min_delay)
+                {
+                    min_delay = delay;
+                }
+            }
+            */
+        }
+        #endif
 
         // sleep for up-to min_delay.  Any events that need attention
         // will call TimeSignalApplicationEvent causing this function

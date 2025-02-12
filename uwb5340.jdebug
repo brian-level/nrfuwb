@@ -22,12 +22,12 @@ void OnProjectLoad (void) {
   //
   // Dialog-generated settings
   //
-  Project.AddPathSubstitute ("/Users/bdodge/UWB/nrfuwb", "$(ProjectDir)");
-  Project.AddPathSubstitute ("/users/bdodge/uwb/nrfuwb", "$(ProjectDir)");
   Project.SetDevice ("nRF5340_xxAA_APP");
-  Project.SetHostIF ("USB", "1050001710");
+  Project.SetHostIF ("USB", "1050094172");
   Project.SetTargetIF ("SWD");
   Project.SetTIFSpeed ("4 MHz");
+  Project.AddPathSubstitute ("/Users/bdodge/UWB/nrfuwb", "$(ProjectDir)");
+  Project.AddPathSubstitute ("/users/bdodge/uwb/nrfuwb", "$(ProjectDir)");
   Project.AddSvdFile ("$(InstallDir)/Config/CPU/Cortex-M33F.svd");
   //
   // User settings

@@ -107,10 +107,13 @@ int BLEServiceInit(void)
 {
     int ret;
 
-    ret = BLECharSettingsInit(&mLevelService.attrs[2]);
+    ret = BLECharCommandInit(&mLevelService.attrs[4]);
     require_noerr(ret, exit);
 
-    ret = BLECharCommandInit(&mLevelService.attrs[4]);
+    ret = BLECharSettingsInit(&mLevelService.attrs[13]);
+    require_noerr(ret, exit);
+
+    ret = BLECharUWBInit(&mLevelService.attrs[18]);
     require_noerr(ret, exit);
 exit:
     return ret;

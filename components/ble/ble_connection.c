@@ -90,6 +90,7 @@ static void _connected(struct bt_conn *conn, uint8_t err)
     {
         if (!mBLE.connections[conndex].conn)
         {
+            /*
             if (mBLE.connectCallback)
             {
                 uint16_t mtu = bt_gatt_get_mtu(conn);
@@ -104,6 +105,7 @@ static void _connected(struct bt_conn *conn, uint8_t err)
                 }
             }
             else
+            */
             {
                 mBLE.connections[conndex].conn = bt_conn_ref(conn);
                 BLEunlock(conn);
@@ -153,10 +155,12 @@ static void _disconnected(struct bt_conn *conn, uint8_t reason)
     {
         if ((void*)mBLE.connections[conndex].conn == conn)
         {
+            /*
             if (mBLE.connectCallback)
             {
                 mBLE.connectCallback((void*)mBLE.connections[conndex].conn, 0, false);
             }
+            */
 
             bt_conn_unref(mBLE.connections[conndex].conn);
             mBLE.connections[conndex].conn = NULL;
@@ -172,10 +176,12 @@ static void _mtu_updated(struct bt_conn *conn, uint16_t tx, uint16_t rx)
 {
     LOG_INF("Updated MTU conn %08X: TX: %d RX: %d bytes", (uint32_t)conn, tx, rx);
 
+    /*
     if (mBLE.mtuUpdateCallback)
     {
         mBLE.mtuUpdateCallback(conn, ((rx < tx) ? rx : tx));
     }
+    */
 }
 
 ble_conn_context_t *BLEinternalConnectionOf(const void * const in_conn_handle)
@@ -272,6 +278,7 @@ int BLEslice(uint32_t *outDelay)
     return result;
 }
 
+#if 0
 int BLEsetDelegate(
             ble_connect_callback_t    inConnectCallback,
             ble_rxdata_callback_t     inRxDataCallback,
@@ -286,6 +293,7 @@ int BLEsetDelegate(
 
     return result;
 }
+#endif
 
 int BLEinit(const char *in_device_name)
 {

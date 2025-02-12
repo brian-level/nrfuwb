@@ -135,7 +135,17 @@ static int hbci_wait_ready(void)
             k_sleep(K_MSEC(1));
         }
     }
-    while (timeout < 1000);
+    while (timeout++ < 500);
+
+    if (timeout >= 500)
+    {
+        LOG_ERR("HBCI timeout");
+        ret = -ETIMEDOUT;
+    }
+    else if (ret)
+    {
+        LOG_ERR("HBCI error");
+    }
 
     return ret;
 }
@@ -154,7 +164,7 @@ static int hbci_transceive(hbci_packet_t *snd, int sndBegin, int sndLen, hbci_pa
     ret = hbci_wait_ready();
     require_noerr(ret, exit);
 
-    ret = NRFSPIread(mRxHeader, HBCI_HDR_LEN, true);
+    ret = NRFSPIread(mRxHeader, HBCI_HDR_LEN);
     require_noerr(ret, exit);
 
     rcv->data = mRxHeader;
@@ -169,7 +179,7 @@ static int hbci_transceive(hbci_packet_t *snd, int sndBegin, int sndLen, hbci_pa
         rcv->data = mIObuf;
         memcpy(rcv->data, mRxHeader, HBCI_HDR_LEN);
 
-        ret = NRFSPIread(rcv->data + HBCI_HDR_LEN, paylen + 1, true);
+        ret = NRFSPIread(rcv->data + HBCI_HDR_LEN, paylen + 1);
         require_noerr(ret, exit);
     }
 
@@ -203,9 +213,7 @@ static int _HbciEncryptedFwDownload(bool *outWarmStart)
     hbci_packet_t snd;
     hbci_packet_t rcv;
     int fwSize;
-    int i;
-    int numChunks;
-    int attempt;
+    int total;
     int ret = -1;
     uint8_t mtype;
     uint8_t gid;
@@ -214,22 +222,24 @@ static int _HbciEncryptedFwDownload(bool *outWarmStart)
     // Probe the device with the first query to see if its already running
     // the f/w we load and is in UCI mode
     //
-    for (attempt = 0; attempt < 3; attempt++)
+    // HBCI QUERY
+    hbci_prepare(&snd, GENERAL_QRY_CLA, QRY_STATUS_INS, FINAL_PACKET);
+    hbci_done(&snd);
+    hbci_transceive_hdr(&snd, &rcv);
+
+    LOG_HEXDUMP_INF(rcv.data, 4, "Probe");
+
+    if (rcv.data[0] != GENERAL_ANS_CLA || rcv.data[1] != ANS_HBCI_READY_INS)
     {
-        // HBCI QUERY
+        // not hbci reply see if its uci
+        //
         hbci_prepare(&snd, GENERAL_QRY_CLA, QRY_STATUS_INS, FINAL_PACKET);
         hbci_done(&snd);
+
+        NRFSPIstartSync();
         hbci_transceive_hdr(&snd, &rcv);
+        NRFSPIstopSync();
 
-        LOG_HEXDUMP_INF(rcv.data, 4, "Probe");
-
-        if (rcv.data[0] == GENERAL_ANS_CLA && rcv.data[1] == ANS_HBCI_READY_INS)
-        {
-            // got the response we expected for hbci mode
-            break;
-        }
-
-        // assume response is UCI for now
         mtype   = rcv.data[0] >> UCI_MT_SHIFT;
         gid     = rcv.data[0] & UCI_GID_MASK;
         oid     = rcv.data[1] & UCI_OID_MASK;
@@ -247,11 +257,6 @@ static int _HbciEncryptedFwDownload(bool *outWarmStart)
                 goto exit;
             }
         }
-
-        // absorb all data to get back to frame
-        //
-        NRFSPIinit();
-        k_sleep(K_MSEC(2));
     }
 
     if (hbci_check(&rcv, GENERAL_ANS_CLA, ANS_HBCI_READY_INS, FINAL_PACKET))
@@ -288,17 +293,16 @@ static int _HbciEncryptedFwDownload(bool *outWarmStart)
         goto exit;
     }
 
-    numChunks = fwSize / FW_CHUNK_LEN + ((fwSize % FW_CHUNK_LEN == 0) ? 0 : 1);
-
-    for (i = 0; i < numChunks; i++)
+    total = 0;
+    while (total < fwSize)
     {
         uint8_t seg;
-        uint16_t chunkLen;
+        int chunkLen;
 
-        //LOG_INF("FW Image %d/%d", (i+1), numChunks);
+        //LOG_INF("FW Image %d/%d", total, fwSize);
 
-        // DEVICE STATUS
-        if (i < numChunks - 1)
+        chunkLen = fwSize - total;
+        if (chunkLen > FW_CHUNK_LEN)
         {
             seg      = SEG_PACKET;
             chunkLen = FW_CHUNK_LEN;
@@ -306,11 +310,10 @@ static int _HbciEncryptedFwDownload(bool *outWarmStart)
         else
         {
             seg      = FINAL_PACKET;
-            chunkLen = fwSize - (numChunks - 1) * FW_CHUNK_LEN;
         }
 
         hbci_prepare(&snd, FW_DWNLD_CMD_CLA, FW_DWNLD_DWNLD_IMAGE, seg);
-        if (hbci_add(&snd, &heliosEncryptedMainlineFwImage[i * FW_CHUNK_LEN], chunkLen))
+        if (hbci_add(&snd, &heliosEncryptedMainlineFwImage[total], chunkLen))
         {
             LOG_ERR("Error adding payload to packet");
             goto exit;
@@ -337,6 +340,8 @@ static int _HbciEncryptedFwDownload(bool *outWarmStart)
             LOG_ERR("Wrong response to payload");
             goto exit;
         }
+
+        total += chunkLen;
     }
 
     // hack, wait for chip to flash this f/w
@@ -353,19 +358,9 @@ static int _HbciEncryptedFwDownload(bool *outWarmStart)
     }
 
     LOG_INF("HELIOS FW download completed");
+    k_sleep(K_MSEC(10));
+
     ret = 0;
-exit:
-    return ret;
-}
-
-int HBCIprotoSlice(uint32_t *delay)
-{
-    int ret;
-    bool readable;
-
-    ret = NRFSPIpoll(&readable);
-    require_noerr(ret, exit);
-
 exit:
     return ret;
 }
@@ -375,6 +370,13 @@ int HBCIprotoInit(bool *outWarmStart)
     int ret = -EINVAL;
 
     require(outWarmStart, exit);
+
+    // enable device
+    NRFSPIenableChip(true);
+
+    // note that the module takes about 9ms to auto-load boot-loader and be online
+    // TODO - move this wait to the app layer?
+    k_sleep(K_MSEC(10));
 
     *outWarmStart = false;
     ret = _HbciEncryptedFwDownload(outWarmStart);

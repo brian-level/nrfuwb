@@ -29,9 +29,11 @@ int NRFSPIwrite(
                 const int inCount);
 int NRFSPIread(
                 uint8_t *outData,
-                int inCount,
-                bool inUseSync);
+                int inCoun);
 
+int NRFSPIenableChip(bool enable);
+int NRFSPIstartSync(void);
+int NRFSPIstopSync(void);
 int NRFSPIpoll(bool *outReadable);
 
 void NRFSPIdeinit(void);
