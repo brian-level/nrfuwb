@@ -1,6 +1,7 @@
 #include "uci_proto.h"
 #include "uci_defs.h"
 #include "uci_ext_defs.h"
+#include "hbci_proto.h"
 #include "nrfspi.h"
 
 #include <stdio.h>
@@ -36,25 +37,12 @@ static struct
     enum {
         UCI_BOOT,
         UCI_INIT,
-        UCI_OFFLINE,
-        UCI_RESET,
-        UCI_IDLE,
+        UCI_READY,
         UCI_TX,
-        UCI_RX,
-        UCI_DELAY
+        UCI_RX
     }
     state, nextstate;
 
-    enum {
-        UWB_INACTIVE,
-        UWB_ACTIVE,
-    }
-    uwb_state;
-
-    bool    online;
-    bool    needs_reset;
-
-    uint64_t delay;
     uint64_t cmd_start;
     uint32_t timeout_count;
 
@@ -86,12 +74,9 @@ static void _uci_dump(
     {
     case UCI_BOOT:      statestr = "BOOT"; break;
     case UCI_INIT:      statestr = "INIT"; break;
-    case UCI_OFFLINE:   statestr = "OFFLINE"; break;
-    case UCI_RESET:     statestr = "RESET"; break;
-    case UCI_IDLE:      statestr = "IDLE"; break;
+    case UCI_READY:     statestr = "READY"; break;
     case UCI_TX:        statestr = "TX"; break;
     case UCI_RX:        statestr = "RX"; break;
-    case UCI_DELAY:     statestr = "DELAY"; break;
     default:            statestr = "????"; break;
     }
 
@@ -203,6 +188,7 @@ static void uci_decode(
     switch (inType)
     {
     case UCI_MT_DATA:
+        break;
     case UCI_MT_NTF:
         switch (inGID)
         {
@@ -219,53 +205,26 @@ static void uci_decode(
                         // NXP proprietary use of device status 0 as
                         // "init, ready to get a proprietary init sequence"
                         //
-                        mUCI.uwb_state = UWB_INACTIVE;
-                        if (mUCI.state == UCI_BOOT)
-                        {
-                            LOG_INF("UWB Device Status Init, Booting");
-                            mUCI.state = UCI_INIT;
-                            mUCI.needs_reset = true;
-                        }
+                        LOG_INF("UWB Device Status Init, Booting");
+                        mUCI.state = UCI_READY;
                     }
                     else if (inData[0] == 1)
                     {
                         LOG_INF("UWB Device Ready");
-
-                        mUCI.online = true;
-                        mUCI.uwb_state = UWB_INACTIVE;
-                        if (mUCI.state == UCI_OFFLINE)
-                        {
-                            #if 1
-                            LOG_INF("Ready, go to IDLE state");
-                            mUCI.state = UCI_IDLE;
-                            #else
-                            LOG_INF("Ready, go to DELAY state");
-                            mUCI.state = UCI_DELAY;
-                            mUCI.nextstate = UCI_IDLE;
-                            mUCI.delay = k_uptime_get() + UCI_RESET_DELAY_MS;
-                            #endif
-                        }
+                        mUCI.state = UCI_READY;
                     }
                     else if (inData[0] == 2)
                     {
-                        mUCI.online = true;
                         LOG_INF("UWB Device Active");
-                        mUCI.uwb_state = UWB_ACTIVE;
+                        mUCI.state = UCI_READY;
                     }
                     else if (inData[0] == 0xFE || inData[0] == 0xFF)
                     {
                         LOG_INF("UWB Device Error/Hang, resetting");
                         // TODO - toggle power?
-                        NRFSPIinit();
                         mUCI.state = UCI_BOOT;
                     }
                 }
-                break;
-            case UCI_MSG_CORE_DEVICE_INFO:
-            case UCI_MSG_CORE_GET_CAPS_INFO:
-            case UCI_MSG_CORE_SET_CONFIG:
-            case UCI_MSG_CORE_GET_CONFIG:
-            case UCI_MSG_CORE_DEVICE_SUSPEND:
                 break;
             case UCI_MSG_CORE_GENERIC_ERROR_NTF:
                 if (inCount > 0 && inData[0] == 0xA)
@@ -275,87 +234,20 @@ static void uci_decode(
                     mUCI.state = UCI_TX;
                 }
                 break;
-            case UCI_MSG_CORE_QUERY_UWBS_TIMESTAMP:
             default:
                 break;
             }
             break;
-        case UCI_GID_SESSION_MANAGE:
-        case UCI_GID_RANGE_MANAGE:
-        case UCI_GID_DATA_CONTROL:
-        case UCI_GID_TEST:
-        case UCI_GID_PROPRIETARY:
-        case UCI_GID_VENDOR:
-        case UCI_GID_PROPRIETARY_SE:
-        case UCI_GID_INTERNAL_GROUP:
-        case UCI_GID_INTERNAL:
         default:
             break;
         }
         break;
     case UCI_MT_CMD:
-        LOG_ERR("Command from dev?");
         break;
     case UCI_MT_RSP:
         mUCI.state = mUCI.nextstate;
         mUCI.timeout_count = 0;
-        switch (inGID)
-        {
-        case UCI_GID_CORE:
-            switch (inOID)
-            {
-            case UCI_MSG_CORE_DEVICE_RESET:
-                LOG_INF("Reset complete");
-                mUCI.needs_reset = false;
-                mUCI.txcnt = 0;
-                break;
-            case UCI_MSG_CORE_DEVICE_STATUS_NTF:
-            case UCI_MSG_CORE_DEVICE_INFO:
-            case UCI_MSG_CORE_GET_CAPS_INFO:
-            case UCI_MSG_CORE_SET_CONFIG:
-            case UCI_MSG_CORE_GET_CONFIG:
-            case UCI_MSG_CORE_DEVICE_SUSPEND:
-                mUCI.txcnt = 0;
-                break;
-            case UCI_MSG_CORE_GENERIC_ERROR_NTF:
-                LOG_WRN("Error response, resetting");
-                mUCI.state = UCI_RESET;
-                mUCI.txcnt = 0;
-                break;
-            case UCI_MSG_CORE_QUERY_UWBS_TIMESTAMP:
-                break;
-            default:
-                break;
-            }
-            break;
-        case UCI_GID_SESSION_MANAGE:
-        case UCI_GID_RANGE_MANAGE:
-        case UCI_GID_DATA_CONTROL:
-        case UCI_GID_TEST:
-            mUCI.txcnt = 0;
-            break;
-        case UCI_GID_PROPRIETARY:
-            if (inOID == EXT_UCI_MSG_CORE_DEVICE_INIT)
-            {
-                // getting a response to our init command means
-                // we can do a normal startup when we get an ok status ntf
-                //
-                if (inCount > 0 && inData[0] == 0)
-                {
-                    LOG_INF("UWB pre-Init OK");
-                    mUCI.state = UCI_OFFLINE;
-                }
-            }
-            mUCI.txcnt = 0;
-            break;
-        case UCI_GID_VENDOR:
-        case UCI_GID_PROPRIETARY_SE:
-        case UCI_GID_INTERNAL_GROUP:
-        case UCI_GID_INTERNAL:
-        default:
-            mUCI.txcnt = 0;
-            break;
-        }
+        mUCI.txcnt = 0;
         break;
     default:
         break;
@@ -388,7 +280,7 @@ static int _UCItxCommand(void)
     // go back to idle when uwbs responds
     //
     mUCI.state = UCI_RX;
-    mUCI.nextstate = UCI_IDLE;
+    mUCI.nextstate = UCI_READY;
 
 #if DUMP_PROTO
 #if DUMP_DECODE_PROTO
@@ -460,8 +352,10 @@ int UCIprotoRead(
     require(outData, exit);
     require(inSize > 0, exit);
 
-    // read header
+    // set sync line active
     ret = NRFSPIstartSync();
+
+    // read header
     ret = NRFSPIread(header, sizeof(header));
     require_noerr(ret, exit);
 
@@ -510,6 +404,7 @@ int UCIprotoRead(
 #endif
 #endif
 exit:
+    // set sync line inactive
     ret = NRFSPIstopSync();
     return ret;
 }
@@ -520,7 +415,7 @@ int UCIprotoWriteRaw(
 {
     int ret = -EINVAL;
 
-    require(mUCI.state == UCI_IDLE, exit);
+    require(mUCI.state == UCI_READY, exit);
     require(inData, exit);
     require(inCount >= UCI_MSG_HDR_SIZE, exit);
     require(inCount <= sizeof(mUCI.txbuf), exit);
@@ -586,7 +481,6 @@ int UCIprotoSlice(
 {
     int ret = -EINVAL;
     bool readable;
-    uint8_t data[32];
     uint64_t now;
 
     require(outHaveMessage && outType && outGID && outOID, exit);
@@ -599,113 +493,78 @@ int UCIprotoSlice(
     *outPayload = NULL;
     *outPayloadLength = 0;
 
-    ret = NRFSPIpoll(&readable);
-    require_noerr(ret, exit);
-
-    if (readable)
+    if (mUCI.state != UCI_BOOT && mUCI.state != UCI_TX)
     {
-        int count;
-        uint8_t type;
-        uint8_t gid;
-        uint8_t oid;
+        ret = NRFSPIpoll(&readable);
+        require_noerr(ret, exit);
 
-        ret = UCIprotoRead(&type, &gid, &oid, mUCI.rxbuf, sizeof(mUCI.rxbuf), &count);
-        if (!ret)
+        if (readable)
         {
-            mUCI.timeout_count = 0;
-            mUCI.rxcnt = count;
+            int count;
+            uint8_t type;
+            uint8_t gid;
+            uint8_t oid;
 
-            // advance our state depending upon response/notification
-            //
-            uci_decode(type, gid, oid, mUCI.rxbuf, count);
+            ret = UCIprotoRead(&type, &gid, &oid, mUCI.rxbuf, sizeof(mUCI.rxbuf), &count);
+            if (!ret)
+            {
+                mUCI.timeout_count = 0;
+                mUCI.rxcnt = count;
 
-            *outHaveMessage = true;
-            *outType = type;
-            *outGID = gid;
-            *outOID = oid;
-            *outPayload = mUCI.rxbuf;
-            *outPayloadLength = mUCI.rxcnt;
+                // advance our state depending upon response/notification
+                //
+                uci_decode(type, gid, oid, mUCI.rxbuf, count);
 
-            // dont ever look at this reply again
-            mUCI.rxcnt = 0;
-            ret = 0;
+                *outHaveMessage = true;
+                *outType = type;
+                *outGID = gid;
+                *outOID = oid;
+                *outPayload = mUCI.rxbuf;
+                *outPayloadLength = mUCI.rxcnt;
+
+                // dont ever look at this reply again
+                mUCI.rxcnt = 0;
+                ret = 0;
+            }
         }
     }
 
     switch (mUCI.state)
     {
     case UCI_BOOT:
-        // wait for init state ntf from UWBS
-        mUCI.online = false;
+        // (re)setup the SPI interface
+        ret = NRFSPIinit();
+        require_noerr(ret, exit);
+
+        // load f/w
+        ret = HBCIprotoInit();
+        require_noerr(ret, exit);
+
+        // when the f/w load is complete, device will
+        // post status ready which moves us to from init state
+        //
+        mUCI.state = UCI_INIT;
         mUCI.timeout_count = 0;
         break;
 
     case UCI_INIT:
-        // send proprietary set-device state to nxp rhodes v4 and get respone
-        mUCI.online = false;
-        data[0] = 0x73;
-        data[1] = 0x04;
-        ret = UCIprotoWrite(UCI_MT_CMD, UCI_GID_PROPRIETARY, EXT_UCI_MSG_CORE_DEVICE_INIT, data, 2);
-        mUCI.nextstate = UCI_OFFLINE;
-        *delay = 2;
-        break;
-
-    case UCI_OFFLINE:
-        // wait for ok state ntf after proprietary init or reset was sent
-        mUCI.online = false;
-        mUCI.timeout_count = 0;
-        *delay = 100;
-        break;
-
-    case UCI_RESET:
-        // send a reset. when the ok status ntf comes back, it will set idle state
-        mUCI.online = false;
-        data[0] = 0;
-        ret = UCIprotoWrite(UCI_MT_CMD, UCI_GID_CORE, UCI_MSG_CORE_DEVICE_RESET, data, 1);
-        mUCI.nextstate = UCI_OFFLINE;
-        *delay = 2;
-        break;
-
-    case UCI_DELAY:
-        if (k_uptime_get() > mUCI.delay)
-        {
-            LOG_INF("Reset delay expired, go to idle");
-            mUCI.state = UCI_IDLE;
-            mUCI.delay = 0;
-        }
+        // getting status in uci proto gets us to ready
         ret = 0;
-        *delay = 2;
         break;
 
-    case UCI_IDLE:
+    case UCI_READY:
         ret = 0;
-        if (mUCI.needs_reset)
-        {
-            mUCI.state = UCI_RESET;
-            mUCI.nextstate = UCI_RESET;
-            *delay = 0;
-        }
-        else
-        {
-            *delay = 100;
-        }
         break;
 
     case UCI_TX: /* retransmit */
         if (mUCI.txcnt > 0)
         {
             ret = _UCItxCommand();
-
-            if (!mUCI.online)
-            {
-                // if haven't got ok ntf yet, go back offline on rsp
-                mUCI.nextstate = UCI_OFFLINE;
-            }
         }
         else
         {
             LOG_ERR("No command to re-transmit?");
-            mUCI.state = UCI_IDLE;
+            mUCI.state = UCI_READY;
         }
         *delay = 10;
         break;
@@ -719,8 +578,7 @@ int UCIprotoSlice(
             {
                 LOG_WRN("Too many timeouts, resetting");
                 mUCI.timeout_count = 0;
-                mUCI.state = UCI_RESET;
-                mUCI.needs_reset = true;
+                mUCI.state = UCI_BOOT;
             }
             else if (mUCI.txcnt)
             {
@@ -730,8 +588,7 @@ int UCIprotoSlice(
             else
             {
                 LOG_ERR("Why Rx if no Tx?");
-                mUCI.state = UCI_RESET;
-                mUCI.needs_reset = true;
+                mUCI.state = UCI_BOOT;
             }
         }
         break;
@@ -746,27 +603,19 @@ exit:
 
 bool UCIready(void)
 {
-    return mUCI.online && mUCI.state == UCI_IDLE;
+    return mUCI.state == UCI_READY;
 }
 
-int UCIprotoInit(bool inWarmStart)
+int UCIprotoInit(void)
 {
     int ret = 0;
 
+    // NOTE: this can/should be callable
+    // per-session
+
     memset(&mUCI, 0, sizeof(mUCI));
 
-    inWarmStart = true;
-
-    if (inWarmStart)
-    {
-        mUCI.state = UCI_IDLE;
-        mUCI.online = true;
-    }
-    else
-    {
-        mUCI.needs_reset = true;
-        mUCI.state = UCI_BOOT;
-    }
+    mUCI.state = UCI_BOOT;
     mUCI.nextstate = UCI_INIT;
     mUCI.timeout_count = 0;
     mUCI.max_packet = UCI_MAX_PAYLOAD_SIZE;

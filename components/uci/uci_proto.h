@@ -29,5 +29,5 @@ int UCIprotoSlice(
                 uint8_t **outPayload,
                 int *outPayloadLength,
                 uint32_t *delay);
-int UCIprotoInit(bool inWarmStart);
+int UCIprotoInit(void);
 

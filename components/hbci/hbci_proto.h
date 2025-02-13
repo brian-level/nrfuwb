@@ -4,5 +4,5 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-int HBCIprotoInit(bool *outWarmStart);
+int HBCIprotoInit(void);
 

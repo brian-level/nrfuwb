@@ -208,7 +208,7 @@ static int hbci_transceive_payload(hbci_packet_t *snd, hbci_packet_t *rcv)
     return hbci_transceive(snd, HBCI_HDR_LEN, snd->len - HBCI_HDR_LEN, rcv);
 }
 
-static int _HbciEncryptedFwDownload(bool *outWarmStart)
+static int _HbciEncryptedFwDownload(void)
 {
     hbci_packet_t snd;
     hbci_packet_t rcv;
@@ -252,7 +252,6 @@ static int _HbciEncryptedFwDownload(bool *outWarmStart)
                 // we assume our f/w is already running and return ok
                 //
                 LOG_INF("UWB f/w apparently running already");
-                *outWarmStart = true;
                 ret = 0;
                 goto exit;
             }
@@ -358,28 +357,24 @@ static int _HbciEncryptedFwDownload(bool *outWarmStart)
     }
 
     LOG_INF("HELIOS FW download completed");
-    k_sleep(K_MSEC(10));
-
     ret = 0;
 exit:
     return ret;
 }
 
-int HBCIprotoInit(bool *outWarmStart)
+int HBCIprotoInit()
 {
     int ret = -EINVAL;
 
-    require(outWarmStart, exit);
-
     // enable device
-    NRFSPIenableChip(true);
+    ret = NRFSPIenableChip(true);
+    require_noerr(ret, exit);
 
     // note that the module takes about 9ms to auto-load boot-loader and be online
     // TODO - move this wait to the app layer?
     k_sleep(K_MSEC(10));
 
-    *outWarmStart = false;
-    ret = _HbciEncryptedFwDownload(outWarmStart);
+    ret = _HbciEncryptedFwDownload();
 exit:
     return ret;
 }

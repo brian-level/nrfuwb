@@ -713,55 +713,65 @@ int UWBSlice(uint32_t *delay)
     uint8_t *payload;
     int     payloadLength;
 
-    ret = UCIprotoSlice(&gotMessage, &type, &gid, &oid, &payload, &payloadLength, delay);
-
-    if (!ret && (gotMessage || UCIready()))
+    if (mUWB.state != UWB_IDLE)
     {
-        switch (mUWB.state)
+        ret = UCIprotoSlice(&gotMessage, &type, &gid, &oid, &payload, &payloadLength, delay);
+    }
+    else
+    {
+        gotMessage = false;
+        ret = 0;
+    }
+
+    switch (mUWB.state)
+    {
+    case UWB_IDLE:
+        if (mUWB.start_request)
         {
-        case UWB_IDLE:
-            if (mUWB.start_request && UCIready())
-            {
-                bool warmStart;
+            // Bring up the UCI interface
+            // (setup SPI, load f/w and init UCI)
+            //
+            ret = UCIprotoInit();
 
-                ret = HBCIprotoInit(&warmStart);
-
-                mUWB.start_request = false;
-                mUWB.state = UWB_SESSION;
-                mUWB.init_state = IS_INIT;
-                mUWB.command_set_count = 0;
-                mUWB.command_set_state = 0;
-                *delay = 20; // let chip boot
-            }
-            break;
-        case UWB_SESSION:
+            mUWB.start_request = false;
+            mUWB.state = UWB_SESSION;
+            mUWB.init_state = IS_INIT;
+            mUWB.command_set_count = 0;
+            mUWB.command_set_state = 0;
+            *delay = 20; // let chip boot
+        }
+        break;
+    case UWB_SESSION:
+        if (UCIready())
+        {
             ret = _uwb_initialize(gotMessage, type, gid, oid, payload, payloadLength);
-#if DUMP_PROTO
-            *delay = 400;
-#else
             if (mUWB.init_state == IS_WAIT_RSP || mUWB.init_state == IS_WAIT_NTF)
             {
+                // SPI interrupt will shorten delat in wait-app-event in main loop
                 *delay = 100;
             }
             else
             {
+                // go right to next command send, no delay
                 *delay = 0;
             }
-#endif
-            break;
-        case UWB_STOP:
+        }
+        break;
+    case UWB_STOP:
+        if (UCIready())
+        {
             ret = UWBWrite(_uwb_add_session_id(UWB_SESSION_DEINIT), UWB_SESSION_DEINIT_SIZE);
             mUWB.state = UWB_RX;
             mUWB.next_state = UWB_IDLE;
-            break;
-        case UWB_RX:
-            if (gotMessage)
-            {
-                *delay = 0;
-                mUWB.state = mUWB.next_state;
-            }
-            break;
         }
+        break;
+    case UWB_RX:
+        if (gotMessage)
+        {
+            *delay = 0;
+            mUWB.state = mUWB.next_state;
+        }
+        break;
     }
 //exit:
     return ret;
@@ -770,15 +780,8 @@ int UWBSlice(uint32_t *delay)
 int UWBinit(session_state_callback_t inSessionStateCallback)
 {
     int ret = 0;
-    bool warmStart;
 
     memset(&mUWB, 0, sizeof(mUWB));
-
-    ret = NRFSPIinit();
-    require_noerr(ret, exit);
-
-    ret = UCIprotoInit(warmStart);
-    require_noerr(ret, exit);
 
     mUWB.session_callback = inSessionStateCallback;
 
@@ -808,7 +811,7 @@ int UWBinit(session_state_callback_t inSessionStateCallback)
 
     mUWB.start_request = true;
     ret = 0;
-exit:
+
     return ret;
 }
 
