@@ -1,4 +1,5 @@
 #include "uwb.h"
+#include "uwb_range.h"
 #include "uwb_defs.h"
 #include "uwb_canned.h"
 #include "hbci_proto.h"
@@ -52,9 +53,9 @@ static struct
         IS_SET_CONFIG,
         IS_READ_OTP_XTAL,
         IS_READ_OTP_TXPOWER,
-        IS_INIT_SESSION,
-        IS_SETUP_SESSION,
         IS_CALIBRATE,
+        IS_INIT_SESSION,
+        IS_APP_CONFIG,
         IS_START_SESSION,
         IS_IN_SESSION,
         IS_SESSION_STOP,
@@ -71,6 +72,12 @@ static struct
     session_state_callback_t session_callback;
 }
 mUWB;
+
+/* shared configuration data from mobile app wrapped
+ * in a profile command
+ */
+static uint8_t UWB_PROPRIETARY_SET_PROFILE_CMD[64];
+static uint32_t UWB_PROPRIETARY_SET_PROFILE_CMD_COUNT;
 
 /*
 static int UWBRead(
@@ -101,73 +108,6 @@ static int UWBWrite(
     require(inCount, exit);
 
     ret = UCIprotoWriteRaw(inData, inCount);
-exit:
-    return ret;
-}
-
-static uint8_t _UWB_GET_UINT8(uint8_t **pcursor)
-{
-    uint8_t *cursor = *pcursor;
-    uint8_t val = *cursor++;
-
-    *pcursor = cursor;
-    return val;
-}
-
-static uint16_t _UWB_GET_UINT16(uint8_t **pcursor)
-{
-    uint8_t *cursor = *pcursor;
-    uint16_t val = ((uint16_t)*cursor++) << 8;
-
-    val = (uint16_t)*cursor++;
-    *pcursor = cursor;
-    return val;
-}
-
-static uint8_t _UWB_GET_UINT32(uint8_t **pcursor)
-{
-    uint8_t *cursor = *pcursor;
-    uint32_t val = ((uint32_t)*cursor++) << 24;
-
-    val |= ((uint32_t)*cursor++) << 16;
-    val |= ((uint32_t)*cursor++) << 8;
-    val |= (uint32_t)*cursor++;
-    *pcursor = cursor;
-    return val;
-}
-
-static int _UWBrangeData(const uint8_t *data, int count)
-{
-    int ret = -EINVAL;
-    range_data_t range;
-    uint8_t *cursor = (uint8_t *)data;
-    int pad;
-
-    require(data, exit);
-    require(count >= 27, exit);
-
-    if (data[27] != 0x00 && data[27] != 0x1B)
-    {
-        LOG_WRN("Range-error");
-        goto exit;
-    }
-    range.sequence   = _UWB_GET_UINT8(&cursor);
-    range.session_id = _UWB_GET_UINT32(&cursor);
-    range.rcr_indication = _UWB_GET_UINT8(&cursor);
-    range.current_ranging_interval = _UWB_GET_UINT16(&cursor);
-    range.ranging_measurement_type = _UWB_GET_UINT8(&cursor);
-    range.antenna_pair_info = _UWB_GET_UINT8(&cursor);
-    range.mac_addr_mode_indicator= _UWB_GET_UINT8(&cursor);
-    for (pad = 0; pad < sizeof(range.reserved); pad++)
-    {
-        range.reserved[pad] = _UWB_GET_UINT8(&cursor);
-    }
-    range.number_of_measurements = _UWB_GET_UINT8(&cursor);
-
-    LOG_INF("Range %02u %08X type=%02u, num=%u",
-        range.sequence, range.session_id, range.ranging_measurement_type,
-        range.number_of_measurements);
-    ret = 0;
 exit:
     return ret;
 }
@@ -238,12 +178,16 @@ static int _uwb_initialize(
 
                 LOG_INF("Session %08X state %02X %02X", session_id, sess_state, sess_reason);
 
-                if (mUWB.next_init_state == IS_SETUP_SESSION || mUWB.next_init_state == IS_IN_SESSION)
+                if (mUWB.next_init_state == IS_APP_CONFIG || mUWB.next_init_state == IS_IN_SESSION)
                 {
+                    if (mUWB.init_state == IS_WAIT_NTF)
+                    {
+                        mUWB.init_state = mUWB.next_init_state;
+                    }
+
                     switch (sess_state)
                     {
                     case UWB_SESSION_INITIALIZED:
-                        mUWB.init_state = mUWB.next_init_state;
                         if (session_id != mUWB.session_id)
                         {
                             LOG_INF("UWBS sets session handle to %08X", session_id);
@@ -295,9 +239,9 @@ static int _uwb_initialize(
         }
         else if (gid == UCI_GID_RANGE_MANAGE && oid == 0x00)
         {
-            _UWBrangeData(payload, payloadLength);
+            UWBrangeData(payload, payloadLength);
         }
-        else if (gid == 0x0A /* proprietary group */)
+        else if (gid == UCI_GID_PROPRIETARY_SE)
         {
             switch (oid)
             {
@@ -396,6 +340,8 @@ static int _uwb_initialize(
             mUWB.commands[mUWB.command_set_count++] = UWB_CORE_GET_DEVICE_INFO_CMD;
             mUWB.command_size[mUWB.command_set_count] = UWB_CORE_GET_CAPS_INFO_CMD_SIZE;
             mUWB.commands[mUWB.command_set_count++] = UWB_CORE_GET_CAPS_INFO_CMD;
+            mUWB.command_size[mUWB.command_set_count] = UWB_CORE_SET_ANTENNAS_DEFINE_SIZE;
+            mUWB.commands[mUWB.command_set_count++] = UWB_CORE_SET_ANTENNAS_DEFINE;
             mUWB.command_set_state = 0;
             break;
         case IS_READ_OTP_XTAL:
@@ -421,33 +367,7 @@ static int _uwb_initialize(
             }
             else
             {
-                mUWB.init_state = IS_INIT_SESSION;
-            }
-            mUWB.command_set_state = 0;
-            break;
-        case IS_INIT_SESSION:
-            mUWB.command_set_count = 0;
-            mUWB.command_size[mUWB.command_set_count] = UWB_CORE_SET_ANTENNAS_DEFINE_SIZE;
-            mUWB.commands[mUWB.command_set_count++] = UWB_CORE_SET_ANTENNAS_DEFINE;
-            mUWB.command_size[mUWB.command_set_count] = UWB_SESSION_INIT_RANGING_SIZE;
-            mUWB.commands[mUWB.command_set_count++] = _uwb_add_session_id(UWB_SESSION_INIT_RANGING);
-            mUWB.command_set_state = 0;
-            break;
-        case IS_SETUP_SESSION:
-            mUWB.command_set_count = 0;
-            mUWB.command_size[mUWB.command_set_count] = UWB_SESSION_SET_APP_CONFIG_SIZE;
-            mUWB.commands[mUWB.command_set_count++] = _uwb_add_session_id(UWB_SESSION_SET_APP_CONFIG);
-            mUWB.command_size[mUWB.command_set_count] = UWB_SESSION_SET_APP_CONFIG_NXP_SIZE;
-            mUWB.commands[mUWB.command_set_count++] = _uwb_add_session_id(UWB_SESSION_SET_APP_CONFIG_NXP);
-            if (mUWB.is_responder)
-            {
-                mUWB.command_size[mUWB.command_set_count] = UWB_SESSION_SET_RESPONDER_CONFIG_SIZE;
-                mUWB.commands[mUWB.command_set_count++] = _uwb_add_session_id(UWB_SESSION_SET_RESPONDER_CONFIG);
-            }
-            else
-            {
-                mUWB.command_size[mUWB.command_set_count] = UWB_SESSION_SET_INITIATOR_CONFIG_SIZE;
-                mUWB.commands[mUWB.command_set_count++] = _uwb_add_session_id(UWB_SESSION_SET_INITIATOR_CONFIG);
+                mUWB.init_state = IS_APP_CONFIG;
             }
             mUWB.command_set_state = 0;
             break;
@@ -522,6 +442,47 @@ static int _uwb_initialize(
             if (mUWB.command_set_count == 0)
             {
                 mUWB.init_state = IS_START_SESSION;
+            }
+            mUWB.command_set_state = 0;
+            break;
+        case IS_INIT_SESSION:
+            mUWB.command_set_count = 0;
+            if (UWB_PROPRIETARY_SET_PROFILE_CMD_COUNT == 0)
+            {
+                mUWB.command_size[mUWB.command_set_count] = UWB_SESSION_INIT_RANGING_SIZE;
+                mUWB.commands[mUWB.command_set_count++] = _uwb_add_session_id(UWB_SESSION_INIT_RANGING);
+            }
+            else
+            {
+                mUWB.command_size[mUWB.command_set_count] = UWB_PROPRIETARY_SET_PROFILE_CMD_COUNT;
+                mUWB.commands[mUWB.command_set_count++] = UWB_PROPRIETARY_SET_PROFILE_CMD;
+            }
+            mUWB.command_set_state = 0;
+            break;
+        case IS_APP_CONFIG:
+            mUWB.command_set_count = 0;
+            if (UWB_PROPRIETARY_SET_PROFILE_CMD_COUNT != 0)
+            {
+                mUWB.init_state = IS_START_SESSION;
+                break;
+            }
+
+            mUWB.command_size[mUWB.command_set_count] = UWB_SESSION_SET_APP_CONFIG_SIZE;
+            mUWB.commands[mUWB.command_set_count++] = _uwb_add_session_id(UWB_SESSION_SET_APP_CONFIG);
+            mUWB.command_size[mUWB.command_set_count] = UWB_SESSION_SET_APP_CONFIG_NXP_SIZE;
+            mUWB.commands[mUWB.command_set_count++] = _uwb_add_session_id(UWB_SESSION_SET_APP_CONFIG_NXP);
+            if (UWB_PROPRIETARY_SET_PROFILE_CMD_COUNT == 0)
+            {
+                if (mUWB.is_responder)
+                {
+                    mUWB.command_size[mUWB.command_set_count] = UWB_SESSION_SET_RESPONDER_CONFIG_SIZE;
+                    mUWB.commands[mUWB.command_set_count++] = _uwb_add_session_id(UWB_SESSION_SET_RESPONDER_CONFIG);
+                }
+                else
+                {
+                    mUWB.command_size[mUWB.command_set_count] = UWB_SESSION_SET_INITIATOR_CONFIG_SIZE;
+                    mUWB.commands[mUWB.command_set_count++] = _uwb_add_session_id(UWB_SESSION_SET_INITIATOR_CONFIG);
+                }
             }
             mUWB.command_set_state = 0;
             break;
@@ -608,22 +569,46 @@ static int _uwb_initialize(
                         // wait for otp notification before moving on?
                         #if  1
                         mUWB.init_state = IS_WAIT_NTF;
-                        mUWB.next_init_state = IS_INIT_SESSION;
+                        mUWB.next_init_state = IS_CALIBRATE;
                         #else
-                        mUWB.init_state = IS_INIT_SESSION;
+                        mUWB.init_state = IS_CALIBRATE;
                         #endif
                         break;
+                    case IS_CALIBRATE:
+                        mUWB.init_state = IS_INIT_SESSION;
+                        break;
                     case IS_INIT_SESSION:
+                        // The response to an init-ranging or set-profile comamnd
+                        // contains the session handle from the device (this is
+                        // an nxp extension even for init-ranging) so use the
+                        // response to set our session handle
+                        //
+                        // it is NOT an error if there is no payload, the ntf
+                        // will have the new session handle
+                        //
+                        if (
+                                (gid == UCI_GID_SESSION_MANAGE && oid == UCI_MSG_SESSION_INIT)
+                            ||  (gid == UCI_GID_PROPRIETARY_SE && oid == EXT_UCI_MSG_SET_PROFILE)
+                        )
+                        {
+                            if (payloadLength >= 5)
+                            {
+                                uint32_t session_id;
+
+                                memcpy(&session_id, payload + 1, 4);
+
+                                LOG_INF("Response to %s sets session id to %08X",
+                                        (gid == UCI_GID_SESSION_MANAGE) ? "INIT-RANGING":"SET_PROFILE", session_id);
+                                mUWB.session_id = session_id;
+                            }
+                        }
                         // after an init-session, need to wait for an initialized
-                        // notification before we can advance to setup session
+                        // notification before we can advance to config app and start
                         //
                         mUWB.init_state = IS_WAIT_NTF;
-                        mUWB.next_init_state = IS_SETUP_SESSION;
+                        mUWB.next_init_state = IS_APP_CONFIG;
                         break;
-                    case IS_SETUP_SESSION:
-                        mUWB.init_state = IS_CALIBRATE;
-                        break;
-                    case IS_CALIBRATE:
+                    case IS_APP_CONFIG:
                         mUWB.init_state = IS_START_SESSION;
                         break;
                     case IS_START_SESSION:
@@ -667,15 +652,48 @@ static int _uwb_initialize(
     return ret;
 }
 
-int UWBStart(uint32_t inSessionID)
+int UWBStart(
+        const uint8_t inType,
+        const uint32_t inSessionID,
+        const uint8_t *inProfile,
+        const int inProfileLength)
 {
     int ret = -EINVAL;
 
-    require(inSessionID != 0, exit);
+    require((inSessionID != 0 || (inProfile && inProfileLength)), exit);
 
     if (mUWB.state != UWB_SESSION)
     {
-        mUWB.session_id = inSessionID;
+        // invalidate any prior session
+        UWB_PROPRIETARY_SET_PROFILE_CMD_COUNT = 0;
+
+        if (inType == UWB_DeviceType_Controller)
+        {
+            mUWB.is_responder = false;
+        }
+        else
+        {
+            mUWB.is_responder = true;
+        }
+
+        if (inSessionID)
+        {
+            mUWB.session_id = inSessionID;
+            LOG_INF("Starting session %08X", inSessionID);
+        }
+        else
+        {
+            uint8_t *cmd = UWB_PROPRIETARY_SET_PROFILE_CMD;
+            mUWB.session_id = 0xDEADBEEF;
+            require((inProfileLength + UCI_MSG_HDR_SIZE) < sizeof(UWB_PROPRIETARY_SET_PROFILE_CMD), exit);
+            cmd[0] = UCI_MTS_CMD | UCI_GID_PROPRIETARY_SE;
+            cmd[1] = EXT_UCI_MSG_SET_PROFILE;
+            cmd[2] = 0;
+            cmd[3] = inProfileLength;
+            memcpy(cmd + UCI_MSG_HDR_SIZE, inProfile, inProfileLength);
+            UWB_PROPRIETARY_SET_PROFILE_CMD_COUNT = inProfileLength + UCI_MSG_HDR_SIZE;
+            LOG_INF("Starting NI Session");
+        }
         mUWB.start_request = true;
         mUWB.stop_request = false;
         ret = 0;
@@ -750,6 +768,10 @@ int UWBSlice(uint32_t *delay)
                 // SPI interrupt will shorten delat in wait-app-event in main loop
                 *delay = 100;
             }
+            else if (mUWB.init_state == IS_IN_SESSION)
+            {
+                *delay = 20;
+            }
             else
             {
                 // go right to next command send, no delay
@@ -809,7 +831,9 @@ int UWBinit(session_state_callback_t inSessionStateCallback)
     mUWB.state = UWB_IDLE;
     mUWB.initialized = true;
 
-    mUWB.start_request = true;
+    UWB_PROPRIETARY_SET_PROFILE_CMD_COUNT = 0;
+
+    //mUWB.start_request = true;
     ret = 0;
 
     return ret;

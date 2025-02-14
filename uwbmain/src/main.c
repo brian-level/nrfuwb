@@ -9,15 +9,13 @@
     #include "level_ble.h"
 #endif
 #include "nearby_interaction.h"
+#include "uwb.h"
 #include "timesvc.h"
 #include "crypto_platform.h"
 
 int main( void )
 {
     int ret;
-    #if CONFIG_BT
-    bool ble_started = false;
-    #endif
 
     LOG_INF("NRF UWB Device");
 
@@ -32,6 +30,11 @@ int main( void )
 
     ret = NIinit();
     require_noerr(ret, exit);
+
+    #if CONFIG_BT
+    ret = BLEinit(CONFIG_BT_DEVICE_NAME);
+    require_noerr(ret, exit);
+    #endif
 
     // Run the application
     //
@@ -49,22 +52,11 @@ int main( void )
         #if CONFIG_BT
         if (UWBReady())
         {
-            /*
-            if (!ble_started)
+            ret = BLEslice(&delay);
+            if (delay < min_delay)
             {
-                ret = BLEinit(CONFIG_BT_DEVICE_NAME);
-                require_noerr(ret, exit);
-                ble_started = true;
+                min_delay = delay;
             }
-            else
-            {
-                ret = BLEslice(&delay);
-                if (delay < min_delay)
-                {
-                    min_delay = delay;
-                }
-            }
-            */
         }
         #endif
 

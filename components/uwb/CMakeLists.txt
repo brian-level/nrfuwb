@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.20.0)
     target_sources(app PRIVATE
-         uwb.c
-				 uwb_canned.c
+        uwb.c
+		uwb_range.c
+        uwb_canned.c
 	)
 
