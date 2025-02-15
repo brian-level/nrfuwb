@@ -5,6 +5,7 @@
 #include "uci_defs.h"
 #include "level_ble.h"
 #include "ble_internal.h"
+#include "timesvc.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -19,11 +20,21 @@
 static struct
 {
     bool        were_initiator;
-    void        *conn_ctx;
+    uint8_t     client_type;
+    uint64_t    start_timer;
+    const void *ble_conn_ctx;
     uint8_t     msgbuf[NI_MAX_MESSAGE];
     uint32_t    msgcnt;
 
-    uint8_t     session_state;
+    enum {
+        SS_INACTIVE,    // nothing happening
+        SS_STARTING,    // we asked session to start
+        SS_INIT,        // uwb told us it inited a session
+        SS_IDLE,        // uwb told us session in created and ready
+        SS_ACTIVE,      // uwb told us session is running
+        SS_OVER         // for any reason, session is stopping
+    }
+    session_state;
 
     uint8_t     our_device_type;
     uint8_t     our_device_role;
@@ -58,53 +69,8 @@ mNI;
 
 #define ACD_CONFIG_LEN      (21)
 
-#if 0
-/* ------- from us to phone: accesory config data
-*/
-    uint8_t customerSpecMajorVer[MAX_SPEC_VER_LEN];
-    uint8_t customerSpecMinorVer[MAX_SPEC_VER_LEN];
-    uint8_t preferedUpdateRate;
-    uint8_t RFU[10];
-    /* uwb config data follows */
-    ...
-
-/* uwb config data
-*/
-    uint8_t length;
-    uint8_t uwb_spec_ver_major[MAX_SPEC_VER_LEN];
-    uint8_t uwb_spec_ver_minor[MAX_SPEC_VER_LEN];
-    uint8_t manufacturer_id[4];
-    uint8_t model_id[4];
-    uint8_t mw_version[4];
-    uint8_t ranging_role;
-    uint8_t device_mac_addr[MAC_SHORT_ADD_LEN];
-    uint8_t clock_drift[2]; /* minor ver 1 only? */
-
-    /* Example of config:
-      0x01, 0x00,
-      0x01, 0x00,
-      0x32, 0x11, 0x10, 0x00,
-      0x46, 0x01, 0x31, 0x00,
-      0x00, 0x00, 0x06, 0x04,
-      0x01,
-      0x05, 0xda,
-      0x64, 0x00
-    */
-/* ------- from phone to us:
-*/
-    /* Example of shared config data (30 opaque bytes) */
-     0x01, 0x00,    /* v maj */
-     0x01, 0x00,    /* v min */
-     0x19,          /* profile blob length */
-     0x55, 0x53, 0x08, 0x51,  /* 25 (v1.1) or 23 (v1.0) blob bytes */
-     0x00, 0x00, 0x0b, 0x09,
-     0x06, 0x00, 0x10, 0x0e,
-     0xc6, 0x00, 0x03, 0x17,
-     0x51, 0xef, 0x27, 0xfb,
-     0xdd, 0x70, 0x75, 0x64,
-     0x00
-
-#endif
+#define NI_CLIENT_TYPE_IOS      (0)
+#define NI_CLIENT_TYPE_ANDROID  (1)
 
 static int _NIputUINT16(uint8_t **pcursor, int *room, const uint16_t data)
 {
@@ -185,7 +151,7 @@ exit:
 
 }
 
-static int _NIcreateIOSacd(void)
+static int _NIcreateIOSacd(uint8_t client_type)
 {
     // Nearby-Interaction-Accessory-Protocol-Specification-Release-R2-1.pdf
 
@@ -194,48 +160,57 @@ static int _NIcreateIOSacd(void)
     int pad;
     int ret;
 
-    ret = _NIputUINT8(&cursor, &room, UWBMSG_CONFIG_DATA);   // header cmd for dispatch
-    require_noerr(ret, exit);
-
-    ret = _NIputUINT16(&cursor, &room, NI_VER_MAJ);      // MajorVersion
-    require_noerr(ret, exit);
-    ret = _NIputUINT16(&cursor, &room, NI_VER_MIN);      // MinorVersion
-    require_noerr(ret, exit);
-    ret = _NIputUINT8(&cursor, &room, UPDATE_RATE_MIN);  // PreferredUpdateRate
-    require_noerr(ret, exit);
-
-    for (pad = 0; pad < 10; pad++)
+    if (client_type == NI_CLIENT_TYPE_IOS)
     {
-        ret = _NIputUINT8(&cursor, &room, 0);            // Reserved
+        ret = _NIputUINT8(&cursor, &room, UWBMSG_CONFIG_DATA);   // header cmd for dispatch
+        require_noerr(ret, exit);
+
+        ret = _NIputUINT16(&cursor, &room, NI_VER_MAJ);      // MajorVersion
+        require_noerr(ret, exit);
+        ret = _NIputUINT16(&cursor, &room, NI_VER_MIN);      // MinorVersion
+        require_noerr(ret, exit);
+        ret = _NIputUINT8(&cursor, &room, UPDATE_RATE_MIN);  // PreferredUpdateRate
+        require_noerr(ret, exit);
+
+        for (pad = 0; pad < 10; pad++)
+        {
+            ret = _NIputUINT8(&cursor, &room, 0);            // Reserved
+            require_noerr(ret, exit);
+        }
+
+        ret = _NIputUINT8(&cursor, &room, ACD_CONFIG_LEN);   // UWBconfigDataLength
+        require_noerr(ret, exit);
+
+        ret = _NIputUINT16(&cursor, &room, mNI.our_uwb_ver[0]);     // MajorVersion
+        require_noerr(ret, exit);
+        ret = _NIputUINT16(&cursor, &room, mNI.our_uwb_ver[1]);     // MinorVersion
+        require_noerr(ret, exit);
+
+        ret = _NIputDATA(&cursor, &room, mNI.our_manuf_id, sizeof(mNI.our_manuf_id));
+        require_noerr(ret, exit);
+        ret = _NIputDATA(&cursor, &room, mNI.our_model_id, sizeof(mNI.our_model_id));
+        require_noerr(ret, exit);
+
+        ret = _NIputUINT16(&cursor, &room, mNI.our_mw_ver[0]);
+        require_noerr(ret, exit);
+        ret = _NIputUINT16(&cursor, &room, mNI.our_mw_ver[1]);
+        require_noerr(ret, exit);
+
+        ret = _NIputUINT8(&cursor, &room, mNI.our_device_role);     // ranging role
+        require_noerr(ret, exit);
+
+        ret = _NIputDATA(&cursor, &room, mNI.our_mac_addr, sizeof(mNI.our_mac_addr));
+        require_noerr(ret, exit);
+        ret = _NIputDATA(&cursor, &room, mNI.our_clock_drift, sizeof(mNI.our_clock_drift));
         require_noerr(ret, exit);
     }
-
-    ret = _NIputUINT8(&cursor, &room, ACD_CONFIG_LEN);   // UWBconfigDataLength
-    require_noerr(ret, exit);
-
-    ret = _NIputUINT16(&cursor, &room, mNI.our_uwb_ver[0]);     // MajorVersion
-    require_noerr(ret, exit);
-    ret = _NIputUINT16(&cursor, &room, mNI.our_uwb_ver[1]);     // MinorVersion
-    require_noerr(ret, exit);
-
-    ret = _NIputDATA(&cursor, &room, mNI.our_manuf_id, sizeof(mNI.our_manuf_id));
-    require_noerr(ret, exit);
-    ret = _NIputDATA(&cursor, &room, mNI.our_model_id, sizeof(mNI.our_model_id));
-    require_noerr(ret, exit);
-
-    ret = _NIputUINT16(&cursor, &room, mNI.our_mw_ver[0]);
-    require_noerr(ret, exit);
-    ret = _NIputUINT16(&cursor, &room, mNI.our_mw_ver[1]);
-    require_noerr(ret, exit);
-
-    ret = _NIputUINT8(&cursor, &room, mNI.our_device_role);     // ranging role
-    require_noerr(ret, exit);
-
-    ret = _NIputDATA(&cursor, &room, mNI.our_mac_addr, sizeof(mNI.our_mac_addr));
-    require_noerr(ret, exit);
-    ret = _NIputDATA(&cursor, &room, mNI.our_clock_drift, sizeof(mNI.our_clock_drift));
-    require_noerr(ret, exit);
-
+    else if (client_type == NI_CLIENT_TYPE_ANDROID)
+    {
+    }
+    else
+    {
+        LOG_ERR("No such client type %u", client_type);
+    }
     mNI.msgcnt = cursor - mNI.msgbuf;
 
     LOG_HEXDUMP_INF(mNI.msgbuf, mNI.msgcnt, "ACD");
@@ -352,12 +327,12 @@ static int _NItxMessage(const uint8_t *inData, const uint32_t inCount)
 {
     int ret;
 
-    if (mNI.conn_ctx)
+    if (mNI.ble_conn_ctx)
     {
         // TODO - what if conn_ctx is an int handle and 0 is valid?
         // maybe use a .is_conn_ctx_set member?
         //
-        ret = BLEinternalNotifyUWB(mNI.conn_ctx, (void*)inData, inCount);
+        ret = BLEinternalNotifyUWB((void*)mNI.ble_conn_ctx, (void*)inData, inCount);
     }
     else
     {
@@ -376,7 +351,11 @@ int NIrxMessage(void *conn_ctx, const uint8_t *inData, const uint32_t inCount)
     require(inData, exit);
     require(inCount > 0, exit);
 
-    mNI.conn_ctx = conn_ctx;
+    if (conn_ctx != mNI.ble_conn_ctx)
+    {
+        LOG_ERR("Rx BLE on different connection?");
+        mNI.ble_conn_ctx = conn_ctx;
+    }
 
     LOG_INF("Got Message %02X %u bytes", inData[0], inCount);
 
@@ -385,16 +364,46 @@ int NIrxMessage(void *conn_ctx, const uint8_t *inData, const uint32_t inCount)
     switch (inData[0])
     {
     case UWBMSG_INITIALIZE_IOS:
-        ret = _NIcreateIOSacd();
-        if (!ret)
+        // iOS client wants to start a session.  We respond
+        // with an AccessoryConfigurationData payload
+        //
+        if (mNI.session_state == SS_INACTIVE)
         {
-            ret = _NItxMessage(mNI.msgbuf, mNI.msgcnt);
+            mNI.client_type = NI_CLIENT_TYPE_IOS;
+            ret = _NIcreateIOSacd(NI_CLIENT_TYPE_IOS);
+            if (!ret)
+            {
+                ret = _NItxMessage(mNI.msgbuf, mNI.msgcnt);
+                mNI.session_state = SS_STARTING;
+                mNI.start_timer = TimeUptimeMilliseconds();
+            }
+        }
+        else
+        {
+            LOG_WRN("Ignoring Init iOS because already active");
         }
         break;
     case UWBMSG_INITIALIZE_ANDROID:
-        LOG_WRN("Android not supported yet");
+        if (mNI.session_state == SS_INACTIVE)
+        {
+            mNI.client_type = NI_CLIENT_TYPE_ANDROID;
+            ret = _NIcreateIOSacd(NI_CLIENT_TYPE_ANDROID);
+            if (!ret)
+            {
+                ret = _NItxMessage(mNI.msgbuf, mNI.msgcnt);
+                mNI.session_state = SS_STARTING;
+                mNI.start_timer = TimeUptimeMilliseconds();
+            }
+        }
+        else
+        {
+            LOG_WRN("Ignoring Init Android because already active");
+        }
         break;
     case UWBMSG_CONFIG_AND_START:
+        // Mobile client is giving us a ShareableConfigurationData blob
+        // which we will pass to the UWB layer and start a session
+        //
         ret = _NIparseIOSscd(inData + 1, inCount - 1, &sessionID, dstMac);
         if (ret)
         {
@@ -411,14 +420,21 @@ int NIrxMessage(void *conn_ctx, const uint8_t *inData, const uint32_t inCount)
 
         if (!ret)
         {
-            ret = UWBStart(mNI.were_initiator  ? UWB_DeviceType_Controller : UWB_DeviceType_Controlee,
+            ret = UWBstart(mNI.were_initiator  ? UWB_DeviceType_Controller : UWB_DeviceType_Controlee,
                         0, mNI.msgbuf, mNI.msgcnt);
+            if (ret)
+            {
+                LOG_WRN("Can't start session");
+                if (mNI.ble_conn_ctx)
+                {
+                    ret = _NIcreateStopped();
+                    ret = _NItxMessage(mNI.msgbuf, mNI.msgcnt);
+                }
+            }
         }
         break;
     case UWBMSG_STOP:
-        ret = UWBStop();
-        //ret = _NIcreateStopped();
-        //ret = _NItxMessage(mNI.msgbuf, mNI.msgcnt);
+        ret = UWBstop();
         break;
     default:
         LOG_WRN("Ignoring cmd 0x%02X", inData[0]);
@@ -439,32 +455,119 @@ static int _SessionStateCallback(uint32_t session_id, uint8_t state, uint8_t rea
     {
     case UWB_SESSION_INITIALIZED:
         LOG_INF("Session %08X Initialized", session_id);
+        mNI.session_state = SS_INIT;
         break;
     case UWB_SESSION_DEINITIALIZED:
         LOG_INF("Session %08X de-Initialized", session_id);
-        if (!ret)
-        {
-            ret = _NIcreateStopped();
-            ret = _NItxMessage(mNI.msgbuf, mNI.msgcnt);
-        }
+        mNI.session_state = SS_OVER;
         break;
     case UWB_SESSION_ACTIVE:
         LOG_INF("Session %08X Active", session_id);
-        ret = _NIcreateStarted();
-        ret = _NItxMessage(mNI.msgbuf, mNI.msgcnt);
+        // Tell mobile client we've started if connected
+        //
+        if (mNI.ble_conn_ctx)
+        {
+            ret = _NIcreateStarted();
+            ret = _NItxMessage(mNI.msgbuf, mNI.msgcnt);
+        }
+        else
+        {
+            ret = 0;
+        }
+        if (!ret)
+        {
+            mNI.session_state = SS_ACTIVE;
+        }
         break;
     case UWB_SESSION_IDLE:
         LOG_INF("Session %08X Idle", session_id);
+        mNI.session_state = SS_IDLE;
         break;
     case UWB_SESSION_ERROR:
         LOG_INF("Session %08X Error %02X", session_id, reason);
+        mNI.session_state = SS_OVER;
         break;
     default:
         break;
     }
 
+    if (mNI.session_state == SS_OVER)
+    {
+        LOG_INF("Session %0X complete", session_id);
+        if (mNI.session_state != SS_INACTIVE && mNI.session_state != SS_OVER)
+        {
+            // Inform mobile session is over
+            //
+            if (mNI.ble_conn_ctx)
+            {
+                ret = _NIcreateStopped();
+                ret = _NItxMessage(mNI.msgbuf, mNI.msgcnt);
+            }
+        }
+
+        mNI.session_state = SS_INACTIVE;
+
+        // make sure underlying session is stopped for sure
+        //
+        UWBstop();
+    }
 
     return ret;
+}
+
+int NIbleConnectHandler(const void * const inConnectionHandle, const uint16_t inMTU, const bool isConnected)
+{
+    int ret = 0;
+    uint32_t session_id;
+    uint8_t sess_state;
+
+    if (isConnected)
+    {
+        mNI.ble_conn_ctx = inConnectionHandle;
+    }
+    else
+    {
+        mNI.ble_conn_ctx = NULL;
+
+        if (mNI.session_state != SS_INACTIVE)
+        {
+            LOG_INF("BLE disconnect stops ranging session");
+            UWBstop();
+        }
+    }
+
+    // when connected, we have no idea what state UWB is in so ask
+    //
+    ret = UWBgetSessionState(&session_id, &sess_state);
+    if (!ret)
+    {
+        switch (sess_state)
+        {
+        case UWB_SESSION_INITIALIZED:
+            mNI.session_state = SS_INIT;
+            break;
+        case UWB_SESSION_DEINITIALIZED:
+            mNI.session_state = SS_INACTIVE;
+            break;
+        case UWB_SESSION_ACTIVE:
+            mNI.session_state = SS_ACTIVE;
+            break;
+        case UWB_SESSION_IDLE:
+            mNI.session_state = SS_IDLE;
+            break;
+        default:
+        case UWB_SESSION_ERROR:
+            mNI.session_state = SS_INACTIVE;
+            break;
+        }
+    }
+    // note, returning non-0 here will close the ble connection
+    return ret;
+}
+
+int NIslice(uint32_t *delay)
+{
+    return UWBslice(delay);
 }
 
 #ifdef CONFIG_SHELL
@@ -473,14 +576,14 @@ static int _SessionStateCallback(uint32_t session_id, uint8_t state, uint8_t rea
 
 static int _CmdStart( const struct shell *shell, size_t argc, char **argv )
 {
-    int ret = UWBStart(UWB_DeviceType_Controlee, 0x11223344, NULL, 0);
+    int ret = UWBstart(UWB_DeviceType_Controlee, 0x11223344, NULL, 0);
 
     return ret;
 }
 
 static int _CmdStop( const struct shell *shell, size_t argc, char **argv )
 {
-    int ret = UWBStop();
+    int ret = UWBstop();
 
     return ret;
 }
@@ -534,8 +637,10 @@ int NIinit(void)
     mNI.our_clock_drift[0] = 0x64;
     mNI.our_clock_drift[1] = 0x00;
 
+    mNI.session_state = SS_INACTIVE;
     ret = UWBinit(_SessionStateCallback);
     require_noerr(ret, exit);
 exit:
     return 0;
 }
+

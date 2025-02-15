@@ -17,8 +17,18 @@
 #define COMPONENT_NAME uwb
 #include "Logging.h"
 
-// Define this non-0 to dump protocol bytes
-#define DUMP_PROTO 0
+// Define this non-0 to dump info
+#define DUMP_PROTO (0)
+
+// how long we expect to be in any sesssion state
+// at most before we give up (milliseconde) (for most states)
+//
+#define UWB_STATE_TRANSITION_TIMEOUT_MS    (40)
+
+#define UWB_NEXT_STATE(ns)  \
+    if (DUMP_PROTO) { LOG_INF("Session-State %d -> %d", mUWB.session_state, ns); }  \
+    mUWB.session_state = ns;                        \
+    mUWB.state_timer = TimeUptimeMilliseconds() + _uwb_time_for_state(ns)
 
 #define UWB_MAX_COMMAND_SET (16)
 
@@ -37,6 +47,8 @@ static struct
     bool start_request;
     bool stop_request;
 
+    uint64_t state_timer;
+
     enum
     {
         UWB_IDLE,
@@ -48,21 +60,24 @@ static struct
 
     enum
     {
-        IS_INIT,
-        IS_RESET,
-        IS_SET_CONFIG,
-        IS_READ_OTP_XTAL,
-        IS_READ_OTP_TXPOWER,
-        IS_CALIBRATE,
-        IS_INIT_SESSION,
-        IS_APP_CONFIG,
-        IS_START_SESSION,
-        IS_IN_SESSION,
-        IS_SESSION_STOP,
-        IS_WAIT_RSP,
-        IS_WAIT_NTF,
+        SS_INIT,
+        SS_RESET,
+        SS_SET_CONFIG,
+        SS_READ_OTP_XTAL,
+        SS_READ_OTP_TXPOWER,
+        SS_CALIBRATE,
+        SS_INIT_SESSION,
+        SS_APP_CONFIG,
+        SS_START_SESSION,
+        SS_IN_SESSION,
+        SS_SESSION_STOP,
+        SS_SESSION_DEINIT,
+        SS_WAIT_RSP,
+        SS_WAIT_NTF,
     }
-    init_state, next_init_state;
+    session_state, next_session_state;
+
+    uint8_t uwb_session_state;
 
     int command_set_count;
     int command_set_state;
@@ -79,26 +94,27 @@ mUWB;
 static uint8_t UWB_PROPRIETARY_SET_PROFILE_CMD[64];
 static uint32_t UWB_PROPRIETARY_SET_PROFILE_CMD_COUNT;
 
-/*
-static int UWBRead(
-                uint8_t *outData,
-                int inSize,
-                int *outCount)
+static uint64_t _uwb_time_for_state(int state)
 {
-    int ret = -EINVAL;
+    uint64_t expect;
 
-    require(outData, exit);
-    require(inSize, exit);
-    require(outCount, exit);
+    switch (state)
+    {
+    case SS_INIT:
+        expect = 1000;  // have to load firmware, etc.
+        break;
+    case SS_WAIT_NTF:
+        expect = 1000;  // no idea how long chip will get its act together
+        break;
+    default:
+        expect = UWB_STATE_TRANSITION_TIMEOUT_MS;
+        break;
+    }
 
-    *outCount = 0;
-    ret = 0;
-exit:
-    return ret;
+    return expect;
 }
-*/
 
-static int UWBWrite(
+static int _uwb_write(
                 const uint8_t *inData,
                 const int inCount)
 {
@@ -130,7 +146,7 @@ static int _uwb_initialize(
     int ret = 0;
     uint8_t status;
 
-    LOG_DBG("Init UWBS state %d [%d of %d]", mUWB.init_state, mUWB.command_set_state, mUWB.command_set_count);
+    LOG_DBG("Init UWBS state %d [%d of %d]", mUWB.session_state, mUWB.command_set_state, mUWB.command_set_count);
 
     if (haveMessage && (type == UCI_MT_NTF))
     {
@@ -144,15 +160,15 @@ static int _uwb_initialize(
 
             if (status)
             {
-                if (mUWB.next_init_state == IS_RESET)
+                if (mUWB.next_session_state == SS_RESET)
                 {
                     LOG_INF("UWBS Ready after devid set, reset");
-                    mUWB.init_state = mUWB.next_init_state;
+                    UWB_NEXT_STATE(mUWB.next_session_state);
                 }
-                else if (mUWB.next_init_state == IS_SET_CONFIG)
+                else if (mUWB.next_session_state == SS_SET_CONFIG)
                 {
                     LOG_INF("UWBS Ready after reset, set config");
-                    mUWB.init_state = mUWB.next_init_state;
+                    UWB_NEXT_STATE(mUWB.next_session_state);
                 }
                 else
                 {
@@ -173,63 +189,55 @@ static int _uwb_initialize(
                 uint8_t  sess_reason;
 
                 memcpy(&session_id, payload, 4);
+
                 sess_state  = payload[4];
                 sess_reason = payload[5];
 
+                mUWB.uwb_session_state = sess_state;
+
                 LOG_INF("Session %08X state %02X %02X", session_id, sess_state, sess_reason);
 
-                if (mUWB.next_init_state == IS_APP_CONFIG || mUWB.next_init_state == IS_IN_SESSION)
+                if (
+                        (mUWB.next_session_state == SS_APP_CONFIG)
+                     || ( mUWB.next_session_state == SS_IN_SESSION)
+                     || ( mUWB.next_session_state == SS_SESSION_DEINIT)
+                )
                 {
-                    if (mUWB.init_state == IS_WAIT_NTF)
+                    if (mUWB.session_state == SS_WAIT_NTF)
                     {
-                        mUWB.init_state = mUWB.next_init_state;
-                    }
-
-                    switch (sess_state)
-                    {
-                    case UWB_SESSION_INITIALIZED:
-                        if (session_id != mUWB.session_id)
-                        {
-                            LOG_INF("UWBS sets session handle to %08X", session_id);
-                            mUWB.session_id = session_id;
-                        }
-                        break;
-                    case UWB_SESSION_DEINITIALIZED:
-                        LOG_DBG("Session %08X de-initialized", session_id);
-                        if (mUWB.session_callback)
-                        {
-                            mUWB.session_callback(session_id, sess_state, sess_reason);
-                        }
-                        break;
-                    case UWB_SESSION_ACTIVE:
-                        LOG_DBG("Session %08X Active!", session_id);
-                        if (mUWB.session_callback)
-                        {
-                            mUWB.session_callback(session_id, sess_state, sess_reason);
-                        }
-                        break;
-                    case UWB_SESSION_IDLE:
-                        LOG_DBG("Session %08X idle", session_id);
-                        if (mUWB.session_callback)
-                        {
-                            mUWB.session_callback(session_id, sess_state, sess_reason);
-                        }
-                        break;
-                    case UWB_SESSION_ERROR:
-                        LOG_DBG("Session %08X error", session_id);
-                        if (mUWB.session_callback)
-                        {
-                            mUWB.session_callback(session_id, sess_state, sess_reason);
-                        }
-                        break;
-                    default:
-                        LOG_WRN("unhandled sess state %02X", sess_state);
-                        break;
+                        UWB_NEXT_STATE(mUWB.next_session_state);
                     }
                 }
-                else
+
+                switch (sess_state)
                 {
-                    LOG_WRN("new session state %02X in state %d", sess_state, mUWB.next_init_state);
+                case UWB_SESSION_INITIALIZED:
+                    if (session_id != mUWB.session_id)
+                    {
+                        LOG_INF("UWBS sets session handle to %08X", session_id);
+                        mUWB.session_id = session_id;
+                    }
+                    break;
+                case UWB_SESSION_DEINITIALIZED:
+                    LOG_DBG("Session %08X de-initialized", session_id);
+                    break;
+                case UWB_SESSION_ACTIVE:
+                    LOG_DBG("Session %08X Active!", session_id);
+                    break;
+                case UWB_SESSION_IDLE:
+                    LOG_DBG("Session %08X idle", session_id);
+                    break;
+                case UWB_SESSION_ERROR:
+                    LOG_DBG("Session %08X error", session_id);
+                    break;
+                default:
+                    LOG_WRN("unhandled sess state %02X", sess_state);
+                    break;
+                }
+
+                if (mUWB.session_callback)
+                {
+                    mUWB.session_callback(session_id, sess_state, sess_reason);
                 }
             }
             else
@@ -262,7 +270,7 @@ static int _uwb_initialize(
                     UWB_SET_CALIBRATION_RF_CLK_ACCURACY_CALIB_CH9[8]  = payload[2];
                     UWB_SET_CALIBRATION_RF_CLK_ACCURACY_CALIB_CH9[10] = payload[3];
                     UWB_SET_CALIBRATION_RF_CLK_ACCURACY_CALIB_CH9[12] = payload[4];
-                    //mUWB.do_OTP_Read_XTAL = false;
+                    mUWB.do_OTP_Read_XTAL = false;
                 }
                 else if (payloadLength == 0x06)
                 {
@@ -273,17 +281,16 @@ static int _uwb_initialize(
                     UWB_SET_CALIBRATION_TX_POWER_CH9[11] = offset;
                     UWB_SET_CALIBRATION_TX_POWER_CH5[9] = payload[3];
                     UWB_SET_CALIBRATION_TX_POWER_CH9[9] = payload[3];
-                    //mUWB.do_OTP_Read_Power = false;
+                    mUWB.do_OTP_Read_Power = false;
                 }
                 else
                 {
                     LOG_WRN("Unhandled read-calib-data ntf");
                 }
-                LOG_INF("Got OTP data, is=%d nis=%d", mUWB.init_state, mUWB.next_init_state);
 
-                if (mUWB.init_state == IS_WAIT_NTF)
+                if (mUWB.session_state == SS_WAIT_NTF)
                 {
-                    mUWB.init_state = mUWB.next_init_state;
+                    UWB_NEXT_STATE(mUWB.next_session_state);
                 }
                 break;
             default:
@@ -294,43 +301,43 @@ static int _uwb_initialize(
         haveMessage = false;
     }
 
-    if (mUWB.init_state != IS_WAIT_RSP && mUWB.command_set_count)
+    if (mUWB.session_state != SS_WAIT_RSP && mUWB.command_set_count)
     {
         if (mUWB.command_set_state < mUWB.command_set_count)
         {
             // send next command to uwbs and wait for reply
             //
-            ret = UWBWrite(mUWB.commands[mUWB.command_set_state], mUWB.command_size[mUWB.command_set_state]);
-            mUWB.next_init_state = mUWB.init_state;
-            mUWB.init_state = IS_WAIT_RSP;
+            ret = _uwb_write(mUWB.commands[mUWB.command_set_state], mUWB.command_size[mUWB.command_set_state]);
+            mUWB.next_session_state = mUWB.session_state;
+            mUWB.session_state = SS_WAIT_RSP;
         }
     }
     else
     {
-        if (mUWB.init_state != IS_WAIT_RSP)
+        if (mUWB.session_state != SS_WAIT_RSP)
         {
             if (mUWB.stop_request)
             {
                 mUWB.stop_request = false;
                 mUWB.start_request = false;
-                mUWB.init_state = IS_SESSION_STOP;
+                UWB_NEXT_STATE(SS_SESSION_STOP);
             };
         }
-        switch (mUWB.init_state)
+        switch (mUWB.session_state)
         {
-        case IS_INIT:
+        case SS_INIT:
             mUWB.command_set_count = 0;
             mUWB.command_size[mUWB.command_set_count] = UWB_INIT_BOARD_VARIANT_SIZE;
             mUWB.commands[mUWB.command_set_count++] = UWB_INIT_BOARD_VARIANT;
             mUWB.command_set_state = 0;
             break;
-        case IS_RESET:
+        case SS_RESET:
             mUWB.command_set_count = 0;
             mUWB.command_size[mUWB.command_set_count] = UWB_RESET_DEVICE_SIZE;
             mUWB.commands[mUWB.command_set_count++] = UWB_RESET_DEVICE;
             mUWB.command_set_state = 0;
             break;
-        case IS_SET_CONFIG:
+        case SS_SET_CONFIG:
             mUWB.command_set_count = 0;
             mUWB.command_size[mUWB.command_set_count] = UWB_CORE_SET_CONFIG_SIZE;
             mUWB.commands[mUWB.command_set_count++] = UWB_CORE_SET_CONFIG;
@@ -344,7 +351,7 @@ static int _uwb_initialize(
             mUWB.commands[mUWB.command_set_count++] = UWB_CORE_SET_ANTENNAS_DEFINE;
             mUWB.command_set_state = 0;
             break;
-        case IS_READ_OTP_XTAL:
+        case SS_READ_OTP_XTAL:
             mUWB.command_set_count = 0;
             if (mUWB.do_OTP_Read_XTAL)
             {
@@ -354,11 +361,11 @@ static int _uwb_initialize(
             }
             else
             {
-                mUWB.init_state = IS_READ_OTP_TXPOWER;
+                UWB_NEXT_STATE(SS_READ_OTP_TXPOWER);
             }
             mUWB.command_set_state = 0;
             break;
-        case IS_READ_OTP_TXPOWER:
+        case SS_READ_OTP_TXPOWER:
             mUWB.command_set_count = 0;
             if (mUWB.do_OTP_Read_Power)
             {
@@ -367,11 +374,11 @@ static int _uwb_initialize(
             }
             else
             {
-                mUWB.init_state = IS_APP_CONFIG;
+                UWB_NEXT_STATE(SS_CALIBRATE);
             }
             mUWB.command_set_state = 0;
             break;
-        case IS_CALIBRATE:
+        case SS_CALIBRATE:
             mUWB.command_set_count = 0;
             if (mUWB.channel_id == 0x05)
             {
@@ -441,11 +448,11 @@ static int _uwb_initialize(
             }
             if (mUWB.command_set_count == 0)
             {
-                mUWB.init_state = IS_START_SESSION;
+                UWB_NEXT_STATE(SS_START_SESSION);
             }
             mUWB.command_set_state = 0;
             break;
-        case IS_INIT_SESSION:
+        case SS_INIT_SESSION:
             mUWB.command_set_count = 0;
             if (UWB_PROPRIETARY_SET_PROFILE_CMD_COUNT == 0)
             {
@@ -459,11 +466,11 @@ static int _uwb_initialize(
             }
             mUWB.command_set_state = 0;
             break;
-        case IS_APP_CONFIG:
+        case SS_APP_CONFIG:
             mUWB.command_set_count = 0;
             if (UWB_PROPRIETARY_SET_PROFILE_CMD_COUNT != 0)
             {
-                mUWB.init_state = IS_START_SESSION;
+                UWB_NEXT_STATE(SS_START_SESSION);
                 break;
             }
 
@@ -486,7 +493,7 @@ static int _uwb_initialize(
             }
             mUWB.command_set_state = 0;
             break;
-        case IS_START_SESSION:
+        case SS_START_SESSION:
             mUWB.command_set_count = 0;
             mUWB.command_size[mUWB.command_set_count] = UWB_SESSION_SET_DEBUG_CONFIG_SIZE;
             mUWB.commands[mUWB.command_set_count++] = _uwb_add_session_id(UWB_SESSION_SET_DEBUG_CONFIG);
@@ -494,17 +501,21 @@ static int _uwb_initialize(
             mUWB.commands[mUWB.command_set_count++] = _uwb_add_session_id(UWB_RANGE_START);
             mUWB.command_set_state = 0;
             break;
-        case IS_IN_SESSION:
+        case SS_IN_SESSION:
             break;
-        case IS_SESSION_STOP:
+        case SS_SESSION_STOP:
             mUWB.command_set_count = 0;
             mUWB.command_size[mUWB.command_set_count] = UWB_RANGE_STOP_SIZE;
             mUWB.commands[mUWB.command_set_count++] = _uwb_add_session_id(UWB_RANGE_STOP);
+            mUWB.command_set_state = 0;
+            break;
+        case SS_SESSION_DEINIT:
+            mUWB.command_set_count = 0;
             mUWB.command_size[mUWB.command_set_count] = UWB_SESSION_DEINIT_SIZE;
             mUWB.commands[mUWB.command_set_count++] = _uwb_add_session_id(UWB_SESSION_DEINIT);
             mUWB.command_set_state = 0;
             break;
-        case IS_WAIT_RSP:
+        case SS_WAIT_RSP:
             if (!haveMessage)
             {
                 break;
@@ -525,7 +536,7 @@ static int _uwb_initialize(
             {
                 // got an OK response, go back to state we were in
                 //
-                mUWB.init_state = mUWB.next_init_state;
+                UWB_NEXT_STATE(mUWB.next_session_state);
 
                 if (mUWB.command_set_state < mUWB.command_set_count)
                 {
@@ -541,43 +552,43 @@ static int _uwb_initialize(
 
                     // Finished a command set, advance state
                     //
-                    switch (mUWB.init_state)
+                    switch (mUWB.session_state)
                     {
-                    case IS_INIT:
+                    case SS_INIT:
                         // wait for ready ntf before doing a reset
-                        mUWB.init_state = IS_WAIT_NTF;
-                        mUWB.next_init_state = IS_RESET;
+                        UWB_NEXT_STATE(SS_WAIT_NTF);
+                        mUWB.next_session_state = SS_RESET;
                         break;
-                    case IS_RESET:
+                    case SS_RESET:
                         // wait for ready ntf before set config
-                        mUWB.init_state = IS_WAIT_NTF;
-                        mUWB.next_init_state = IS_SET_CONFIG;
+                        UWB_NEXT_STATE(SS_WAIT_NTF);
+                        mUWB.next_session_state = SS_SET_CONFIG;
                         break;
-                    case IS_SET_CONFIG:
-                        mUWB.init_state = IS_READ_OTP_XTAL;
+                    case SS_SET_CONFIG:
+                        UWB_NEXT_STATE(SS_READ_OTP_XTAL);
                         break;
-                    case IS_READ_OTP_XTAL:
+                    case SS_READ_OTP_XTAL:
                         // wait for otp notification before moving on?
                         #if  1
-                        mUWB.init_state = IS_WAIT_NTF;
-                        mUWB.next_init_state = IS_READ_OTP_TXPOWER;
+                        UWB_NEXT_STATE(SS_WAIT_NTF);
+                        mUWB.next_session_state = SS_READ_OTP_TXPOWER;
                         #else
-                        mUWB.init_state = IS_READ_OTP_TXPOWER;
+                        UWB_NEXT_STATE(SS_READ_OTP_TXPOWER);
                         #endif
                         break;
-                    case IS_READ_OTP_TXPOWER:
+                    case SS_READ_OTP_TXPOWER:
                         // wait for otp notification before moving on?
                         #if  1
-                        mUWB.init_state = IS_WAIT_NTF;
-                        mUWB.next_init_state = IS_CALIBRATE;
+                        UWB_NEXT_STATE(SS_WAIT_NTF);
+                        mUWB.next_session_state = SS_CALIBRATE;
                         #else
-                        mUWB.init_state = IS_CALIBRATE;
+                        UWB_NEXT_STATE(SS_CALIBRATE);
                         #endif
                         break;
-                    case IS_CALIBRATE:
-                        mUWB.init_state = IS_INIT_SESSION;
+                    case SS_CALIBRATE:
+                        UWB_NEXT_STATE(SS_INIT_SESSION);
                         break;
-                    case IS_INIT_SESSION:
+                    case SS_INIT_SESSION:
                         // The response to an init-ranging or set-profile comamnd
                         // contains the session handle from the device (this is
                         // an nxp extension even for init-ranging) so use the
@@ -605,28 +616,39 @@ static int _uwb_initialize(
                         // after an init-session, need to wait for an initialized
                         // notification before we can advance to config app and start
                         //
-                        mUWB.init_state = IS_WAIT_NTF;
-                        mUWB.next_init_state = IS_APP_CONFIG;
+                        UWB_NEXT_STATE(SS_WAIT_NTF);
+                        mUWB.next_session_state = SS_APP_CONFIG;
                         break;
-                    case IS_APP_CONFIG:
-                        mUWB.init_state = IS_START_SESSION;
+                    case SS_APP_CONFIG:
+                        UWB_NEXT_STATE(SS_START_SESSION);
                         break;
-                    case IS_START_SESSION:
+                    case SS_START_SESSION:
                         // after a start-session, need to wait for active
                         // notification to ensure we started it ok
                         //
-                        mUWB.init_state = IS_WAIT_NTF;
-                        mUWB.next_init_state = IS_IN_SESSION;
+                        UWB_NEXT_STATE(SS_WAIT_NTF);
+                        mUWB.next_session_state = SS_IN_SESSION;
                         break;
-                    case IS_IN_SESSION:
-                        mUWB.init_state = IS_IN_SESSION;
+                    case SS_IN_SESSION:
                         break;
-                    case IS_SESSION_STOP:
+                    case SS_SESSION_STOP:
+                        // wait for session status to go idle or less to de-init
+                        UWB_NEXT_STATE(SS_WAIT_NTF);
+                        mUWB.next_session_state = SS_SESSION_DEINIT;
+                        break;
+                    case SS_SESSION_DEINIT:
+                        // for some reason chip doesn't send a notificatoin for this
+                        // so announce it ourselves
+                        UWB_NEXT_STATE(UWB_SESSION_DEINITIALIZED);
                         mUWB.state = UWB_IDLE;
-                        NRFSPIenableChip(false);
+                        UCIprotoDeInit();
+                        if (mUWB.session_callback)
+                        {
+                            mUWB.session_callback(mUWB.session_id, UWB_SESSION_DEINITIALIZED, 0);
+                        }
                         break;
-                    case IS_WAIT_RSP:
-                    case IS_WAIT_NTF:
+                    case SS_WAIT_RSP:
+                    case SS_WAIT_NTF:
                         LOG_WRN("Shouldnt be here");
                         break;
                     }
@@ -638,12 +660,12 @@ static int _uwb_initialize(
             }
             break;
 
-        case IS_WAIT_NTF:
+        case SS_WAIT_NTF:
             break;
 
         default:
             LOG_INF("Done with Init");
-            mUWB.init_state = IS_IN_SESSION;
+            UWB_NEXT_STATE(SS_IN_SESSION);
             mUWB.state = UWB_SESSION;
             break;
         }
@@ -652,7 +674,24 @@ static int _uwb_initialize(
     return ret;
 }
 
-int UWBStart(
+void _uwb_reset(void)
+{
+    UCIprotoDeInit();
+    mUWB.state = UWB_IDLE;
+    mUWB.session_state = SS_INIT;
+    mUWB.uwb_session_state = UWB_SESSION_DEINITIALIZED;
+    mUWB.command_set_count = 0;
+    mUWB.command_set_state = 0;
+    mUWB.uwb_session_state = UWB_SESSION_DEINITIALIZED;
+    UWB_PROPRIETARY_SET_PROFILE_CMD_COUNT = 0;
+
+    if (mUWB.session_callback)
+    {
+        mUWB.session_callback(0, UWB_SESSION_DEINITIALIZED, 0);
+    }
+}
+
+int UWBstart(
         const uint8_t inType,
         const uint32_t inSessionID,
         const uint8_t *inProfile,
@@ -679,7 +718,7 @@ int UWBStart(
         if (inSessionID)
         {
             mUWB.session_id = inSessionID;
-            LOG_INF("Starting session %08X", inSessionID);
+            LOG_INF("Starting Local session %08X", inSessionID);
         }
         else
         {
@@ -701,6 +740,7 @@ int UWBStart(
     else
     {
         LOG_WRN("Already in session, not starting");
+        ret = 0;
     }
 
     TimeSignalApplicationEvent();
@@ -708,12 +748,23 @@ exit:
     return ret;
 }
 
-int UWBStop(void)
+int UWBstop(void)
 {
-    mUWB.start_request = false;
-    mUWB.stop_request = true;
+    int ret = -EINVAL;
+
+    if (mUWB.state != UWB_IDLE)
+    {
+        mUWB.start_request = false;
+        mUWB.stop_request = true;
+        ret = 0;
+    }
+    else
+    {
+        LOG_WRN("Not in a session, not stopping");
+    }
+
     TimeSignalApplicationEvent();
-    return 0;
+    return ret;
 }
 
 bool UWBReady(void)
@@ -721,7 +772,33 @@ bool UWBReady(void)
     return mUWB.state == UWB_IDLE;
 }
 
-int UWBSlice(uint32_t *delay)
+int UWBgetSessionState(uint32_t *outSessionID, eSESSION_STATUS_t *outState)
+{
+    int ret = -EINVAL;
+    eSESSION_STATUS_t state = UWB_SESSION_DEINITIALIZED;
+    uint32_t session_id = 0;
+
+    require(outSessionID, exit);
+    require(outState, exit);
+
+    if (mUWB.state == UWB_SESSION)
+    {
+        session_id = mUWB.session_id;
+
+        if (mUWB.session_state >= SS_INIT_SESSION)
+        {
+            state = mUWB.uwb_session_state;
+        }
+    }
+
+    *outSessionID = session_id;
+    *outState = state;
+    ret = 0;
+exit:
+    return ret;
+}
+
+int UWBslice(uint32_t *delay)
 {
     int ret = 0;
     bool gotMessage;
@@ -734,6 +811,11 @@ int UWBSlice(uint32_t *delay)
     if (mUWB.state != UWB_IDLE)
     {
         ret = UCIprotoSlice(&gotMessage, &type, &gid, &oid, &payload, &payloadLength, delay);
+        if (ret)
+        {
+            LOG_ERR("UCI Error resets UWB");
+            _uwb_reset();
+        }
     }
     else
     {
@@ -753,7 +835,7 @@ int UWBSlice(uint32_t *delay)
 
             mUWB.start_request = false;
             mUWB.state = UWB_SESSION;
-            mUWB.init_state = IS_INIT;
+            UWB_NEXT_STATE(SS_INIT);
             mUWB.command_set_count = 0;
             mUWB.command_set_state = 0;
             *delay = 20; // let chip boot
@@ -763,12 +845,14 @@ int UWBSlice(uint32_t *delay)
         if (UCIready())
         {
             ret = _uwb_initialize(gotMessage, type, gid, oid, payload, payloadLength);
-            if (mUWB.init_state == IS_WAIT_RSP || mUWB.init_state == IS_WAIT_NTF)
+            if (mUWB.session_state == SS_WAIT_RSP || mUWB.session_state == SS_WAIT_NTF)
             {
-                // SPI interrupt will shorten delat in wait-app-event in main loop
+                // SPI interrupt will shorten delay in wait-app-event in main loop
+                // so ok to delay a bunch while waiting for uci response
+                //
                 *delay = 100;
             }
-            else if (mUWB.init_state == IS_IN_SESSION)
+            else if (mUWB.session_state == SS_IN_SESSION)
             {
                 *delay = 20;
             }
@@ -777,12 +861,26 @@ int UWBSlice(uint32_t *delay)
                 // go right to next command send, no delay
                 *delay = 0;
             }
+
+            // check state transition timer. if it expires, reset states
+            //
+            if (mUWB.session_state != SS_IN_SESSION)
+            {
+                volatile uint64_t now = TimeUptimeMilliseconds();
+
+                if (now  > mUWB.state_timer)
+                {
+                    LOG_INF("Del=%u  now=%llu to=%llu", *delay, now, mUWB.state_timer);
+                    LOG_ERR("Did not transition from state %d, resetting states",  mUWB.session_state);
+                    _uwb_reset();
+                }
+            }
         }
         break;
     case UWB_STOP:
         if (UCIready())
         {
-            ret = UWBWrite(_uwb_add_session_id(UWB_SESSION_DEINIT), UWB_SESSION_DEINIT_SIZE);
+            ret = _uwb_write(_uwb_add_session_id(UWB_SESSION_DEINIT), UWB_SESSION_DEINIT_SIZE);
             mUWB.state = UWB_RX;
             mUWB.next_state = UWB_IDLE;
         }
@@ -795,7 +893,7 @@ int UWBSlice(uint32_t *delay)
         }
         break;
     }
-//exit:
+
     return ret;
 }
 
@@ -811,10 +909,6 @@ int UWBinit(session_state_callback_t inSessionStateCallback)
     mUWB.do_OTP_Read_XTAL = true;
     mUWB.do_OTP_Read_Power = true;
 
-    mUWB.init_state = 0;
-    mUWB.command_set_state = 0;
-    mUWB.command_set_count = 0;
-
     /* note this has to exactly match "other radio" of
      * the ranging session to work, so beware
      */
@@ -828,14 +922,11 @@ int UWBinit(session_state_callback_t inSessionStateCallback)
     mUWB.start_request = false;
     mUWB.stop_request = false;
 
-    mUWB.state = UWB_IDLE;
+    _uwb_reset();
+
     mUWB.initialized = true;
 
-    UWB_PROPRIETARY_SET_PROFILE_CMD_COUNT = 0;
-
-    //mUWB.start_request = true;
     ret = 0;
-
     return ret;
 }
 

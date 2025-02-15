@@ -62,13 +62,15 @@ typedef enum
 }
 ble_data_type_t;
 
+typedef const int (*ble_connect_callback_t)(const void * const inConnectionHandle, const uint16_t inMTU, const bool isConnected);
+
 // connection
 //
 int     BLEunlock(ble_conn_handle_t in_conn);
 int     BLEdisconnect(ble_conn_handle_t in_conn);
 bool    BLEisShellEnabled(void);
 int     BLEslice(uint32_t *outDelay);
-int     BLEinit(const char *in_device_name);
+int     BLEinit(const char *in_device_name, ble_connect_callback_t inConnectCallback);
 
 int     BLEwriteUWBCharacteristic(ble_conn_handle_t in_conn, const uint8_t *const inData, const size_t inDataLen);
 

@@ -90,7 +90,6 @@ static void _connected(struct bt_conn *conn, uint8_t err)
     {
         if (!mBLE.connections[conndex].conn)
         {
-            /*
             if (mBLE.connectCallback)
             {
                 uint16_t mtu = bt_gatt_get_mtu(conn);
@@ -105,7 +104,6 @@ static void _connected(struct bt_conn *conn, uint8_t err)
                 }
             }
             else
-            */
             {
                 mBLE.connections[conndex].conn = bt_conn_ref(conn);
                 BLEunlock(conn);
@@ -155,12 +153,10 @@ static void _disconnected(struct bt_conn *conn, uint8_t reason)
     {
         if ((void*)mBLE.connections[conndex].conn == conn)
         {
-            /*
             if (mBLE.connectCallback)
             {
                 mBLE.connectCallback((void*)mBLE.connections[conndex].conn, 0, false);
             }
-            */
 
             bt_conn_unref(mBLE.connections[conndex].conn);
             mBLE.connections[conndex].conn = NULL;
@@ -295,7 +291,7 @@ int BLEsetDelegate(
 }
 #endif
 
-int BLEinit(const char *in_device_name)
+int BLEinit(const char *in_device_name, ble_connect_callback_t inConnectCallback)
 {
     int result = -1;
 
@@ -333,6 +329,7 @@ int BLEinit(const char *in_device_name)
         LOG_ERR("Can't ble_set_name %s", mBLE.device_name);
     }
 
+    mBLE.connectCallback = inConnectCallback;
 exit:
     return result;
 }

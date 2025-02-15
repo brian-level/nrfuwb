@@ -13,7 +13,7 @@
 #include "Logging.h"
 
 // Define this non-0 to dump protocol bytes
-#define DUMP_PROTO (1)
+#define DUMP_PROTO (0)
 
 // Define this non-0 to decode protocol in dump (else raw bytes)
 #define DUMP_DECODE_PROTO (0)
@@ -35,6 +35,7 @@
 static struct
 {
     enum {
+        UCI_IDLE,
         UCI_BOOT,
         UCI_INIT,
         UCI_READY,
@@ -42,6 +43,8 @@ static struct
         UCI_RX
     }
     state, nextstate;
+
+    bool    spi_inited;
 
     uint64_t cmd_start;
     uint32_t timeout_count;
@@ -531,10 +534,19 @@ int UCIprotoSlice(
 
     switch (mUCI.state)
     {
+    case UCI_IDLE:
+        LOG_WRN("why call slice in idle state?");
+        break;
+
     case UCI_BOOT:
         // (re)setup the SPI interface
         ret = NRFSPIinit();
         require_noerr(ret, exit);
+
+        // allow later use of spi.  once its been inited once
+        // its usable for the rest of up-time
+        //
+        mUCI.spi_inited = true;
 
         // load f/w
         ret = HBCIprotoInit();
@@ -606,12 +618,24 @@ bool UCIready(void)
     return mUCI.state == UCI_READY;
 }
 
+int UCIprotoDeInit(void)
+{
+    if (mUCI.spi_inited)
+    {
+        NRFSPIstopSync();
+        NRFSPIenableChip(false);
+    }
+
+    mUCI.state = UCI_IDLE;
+    return 0;
+}
+
 int UCIprotoInit(void)
 {
     int ret = 0;
 
     // NOTE: this can/should be callable
-    // per-session
+    // per-session, not just once
 
     memset(&mUCI, 0, sizeof(mUCI));
 

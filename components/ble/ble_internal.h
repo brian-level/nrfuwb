@@ -38,6 +38,7 @@ typedef struct
     uint32_t    adv_stop_time;
     bool        shell_inited;
 
+				ble_connect_callback_t connectCallback;
     ble_conn_context_t connections[BT_MAX_CONCURRENT];
 }
 ble_context_t;

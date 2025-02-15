@@ -32,7 +32,7 @@ int main( void )
     require_noerr(ret, exit);
 
     #if CONFIG_BT
-    ret = BLEinit(CONFIG_BT_DEVICE_NAME);
+    ret = BLEinit(CONFIG_BT_DEVICE_NAME, NIbleConnectHandler);
     require_noerr(ret, exit);
     #endif
 
@@ -43,20 +43,17 @@ int main( void )
         delay = 200;
         min_delay = delay;
 
-        ret = UWBSlice(&delay);
+        ret = NIslice(&delay);
         if (delay < min_delay)
         {
             min_delay = delay;
         }
 
         #if CONFIG_BT
-        if (UWBReady())
+        ret = BLEslice(&delay);
+        if (delay < min_delay)
         {
-            ret = BLEslice(&delay);
-            if (delay < min_delay)
-            {
-                min_delay = delay;
-            }
+            min_delay = delay;
         }
         #endif
 
