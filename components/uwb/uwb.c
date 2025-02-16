@@ -25,6 +25,10 @@
 //
 #define UWB_STATE_TRANSITION_TIMEOUT_MS    (40)
 
+// how many consquetive range errors before we shut down
+//
+#define UWB_MAX_RANGE_ERRORS    (32)
+
 #define UWB_NEXT_STATE(ns)  \
     if (DUMP_PROTO) { LOG_INF("Session-State %d -> %d", mUWB.session_state, ns); }  \
     mUWB.session_state = ns;                        \
@@ -48,6 +52,7 @@ static struct
     bool stop_request;
 
     uint64_t state_timer;
+    uint32_t range_errors;
 
     enum
     {
@@ -247,7 +252,25 @@ static int _uwb_initialize(
         }
         else if (gid == UCI_GID_RANGE_MANAGE && oid == 0x00)
         {
-            UWBrangeData(payload, payloadLength);
+            int rret = UWBrangeData(payload, payloadLength);
+
+            if (rret)
+            {
+                mUWB.range_errors++;
+
+                // if consequetive range errors get big assume
+                // the session is hopeless and stop it
+                //
+                if (mUWB.range_errors > UWB_MAX_RANGE_ERRORS && !mUWB.stop_request)
+                {
+                    LOG_ERR("Too many consequetive range errors, stopping");
+                    mUWB.stop_request = true;
+                }
+            }
+            else
+            {
+                mUWB.range_errors = 0;
+            }
         }
         else if (gid == UCI_GID_PROPRIETARY_SE)
         {
@@ -326,6 +349,7 @@ static int _uwb_initialize(
         switch (mUWB.session_state)
         {
         case SS_INIT:
+            mUWB.range_errors = 0;
             mUWB.command_set_count = 0;
             mUWB.command_size[mUWB.command_set_count] = UWB_INIT_BOARD_VARIANT_SIZE;
             mUWB.commands[mUWB.command_set_count++] = UWB_INIT_BOARD_VARIANT;

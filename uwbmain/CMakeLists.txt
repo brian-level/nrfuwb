@@ -52,6 +52,7 @@ add_level_component(hbci)
 add_level_component(nrfspi)
 add_level_component(timesvc)
 add_level_component(crypto)
+add_level_component(ssd1306)
 
 if(CONFIG_BT)
   add_level_component(ble)

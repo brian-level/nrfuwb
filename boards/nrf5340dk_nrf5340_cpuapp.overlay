@@ -33,11 +33,39 @@ spi1: &spi1 {
 };
 
 &i2c1 {
-	compatible = "nordic,nrf-i2c";
+	compatible = "nordic,nrf-twim";
     status = "disabled";
 };
 
+&i2c2 {
+    compatible = "nordic,nrf-twim";
+	zephyr,flash-buf-max-size = <2048>;
+    status = "okay";
+    clock-frequency = <I2C_BITRATE_STANDARD>;
+    pinctrl-0 = <&i2c2_default>;
+    pinctrl-1 = <&i2c2_sleep>;
+    pinctrl-names = "default", "sleep";
+
+	/* SSD1306 OLED display */
+    display: ssd1306@3c {
+        compatible = "solomon,ssd1306fb";
+        reg = <0x3c>;
+        label = "SSD1306";
+        height = <64>;
+        width  = <128>;
+        segment-offset  = <0>;
+        page-offset     = <0>;
+        display-offset  = <0>;
+        multiplex-ratio = <31>;
+        prechargep      = <0xD1>;
+        segment-remap;
+        com-invdir;
+        com-sequential;
+    };
+};
+
 #include "nrf5340dk_nrf5340-pinctrl.dtsi"
+
 
 / {
 	gpio {

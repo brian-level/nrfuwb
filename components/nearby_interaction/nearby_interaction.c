@@ -9,6 +9,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include <zephyr/kernel.h>
 #include <zephyr/types.h>
 
@@ -160,6 +161,19 @@ static int _NIcreateIOSacd(uint8_t client_type)
     int pad;
     int ret;
 
+#if 1 // be the controller
+    mNI.were_initiator = true;
+    mNI.our_device_type = UWB_DeviceType_Controller;
+    mNI.our_device_role = UWB_DeviceRole_Initiator;
+    mNI.our_mac_addr[0] = 0x11;
+    mNI.our_mac_addr[1] = 0x11;
+#else
+    mNI.were_initiator = false;
+    mNI.our_device_type = UWB_DeviceType_Controlee;
+    mNI.our_device_role = UWB_DeviceRole_Responder;
+    mNI.our_mac_addr[0] = 0x22;
+    mNI.our_mac_addr[1] = 0x22;
+#endif
     if (client_type == NI_CLIENT_TYPE_IOS)
     {
         ret = _NIputUINT8(&cursor, &room, UWBMSG_CONFIG_DATA);   // header cmd for dispatch
@@ -576,7 +590,46 @@ int NIslice(uint32_t *delay)
 
 static int _CmdStart( const struct shell *shell, size_t argc, char **argv )
 {
-    int ret = UWBstart(UWB_DeviceType_Controlee, 0x11223344, NULL, 0);
+    bool initiate = false;
+    uint32_t session_id = 0x11223344;
+
+    if (argc > 1)
+    {
+        switch ((*++argv)[0])
+        {
+        case 'i':
+        case 'I':
+            initiate = true;
+            break;
+        }
+
+        if (argc > 2)
+        {
+            session_id = strtoul(*++argv, NULL, 0);
+        }
+    }
+
+    if (initiate)
+    {
+        mNI.were_initiator = true;
+        mNI.our_device_type = UWB_DeviceType_Controller;
+        mNI.our_device_role = UWB_DeviceRole_Initiator;
+        mNI.our_mac_addr[0] = 0x11;
+        mNI.our_mac_addr[1] = 0x11;
+    }
+    else
+    {
+        mNI.were_initiator = false;
+        mNI.our_device_type = UWB_DeviceType_Controlee;
+        mNI.our_device_role = UWB_DeviceRole_Responder;
+        mNI.our_mac_addr[0] = 0x22;
+        mNI.our_mac_addr[1] = 0x22;
+    }
+
+    shell_print(shell, "Starting %s ranging session id %08X",
+            initiate ? "initator" : "responder", session_id);
+
+    int ret = UWBstart(mNI.our_device_type, session_id, NULL, 0);
 
     return ret;
 }
@@ -589,8 +642,12 @@ static int _CmdStop( const struct shell *shell, size_t argc, char **argv )
 }
 
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_ni,
-    SHELL_CMD(start, NULL,   " Start a ranging session\n", _CmdStart),
-    SHELL_CMD(stop, NULL,    " Stop a ranging session\n", _CmdStop),
+    SHELL_CMD_ARG(start, NULL,
+            " Start ranging session [i|r] [sessoion id]\n",
+            _CmdStart, 0, 2),
+    SHELL_CMD(stop, NULL,
+            " Stop ranging session\n",
+            _CmdStop),
     SHELL_SUBCMD_SET_END
 );
 
@@ -605,19 +662,6 @@ int NIinit(void)
 
     memset(&mNI, 0, sizeof(mNI));
 
-#if 1 // be the controller
-    mNI.were_initiator = true;
-    mNI.our_device_type = UWB_DeviceType_Controller;
-    mNI.our_device_role = UWB_DeviceRole_Initiator;
-    mNI.our_mac_addr[0] = 0x11;
-    mNI.our_mac_addr[1] = 0x11;
-#else
-    mNI.were_initiator = false;
-    mNI.our_device_type = UWB_DeviceType_Controlee;
-    mNI.our_device_role = UWB_DeviceRole_Responder;
-    mNI.our_mac_addr[0] = 0x22;
-    mNI.our_mac_addr[1] = 0x22;
-#endif
     mNI.our_uwb_ver[0] = 1;
     mNI.our_uwb_ver[1] = 1;
 

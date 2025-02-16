@@ -12,6 +12,9 @@
 #include "uwb.h"
 #include "timesvc.h"
 #include "crypto_platform.h"
+#ifdef CONFIG_SSD1306
+#include "display.h"
+#endif
 
 int main( void )
 {
@@ -31,6 +34,15 @@ int main( void )
     ret = NIinit();
     require_noerr(ret, exit);
 
+    #ifdef CONFIG_SSD1306
+    ret = DisplayInit();
+    require_noerr(ret, exit);
+
+    DisplaySetFont(8);
+    DisplayText(34, 0, "-- Level --");
+    DisplaySetFont(20);
+    DisplayText(44, 12, "UWB");
+    #endif
     #if CONFIG_BT
     ret = BLEinit(CONFIG_BT_DEVICE_NAME, NIbleConnectHandler);
     require_noerr(ret, exit);
