@@ -47,13 +47,13 @@ static struct bt_data s_adv_data[] =
                   (CONFIG_BT_DEVICE_APPEARANCE >> 0) & 0xff,
                   (CONFIG_BT_DEVICE_APPEARANCE >> 8) & 0xff),
     BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
-    BT_DATA_BYTES(BT_DATA_UUID16_ALL,
-                  BT_UUID_16_ENCODE(BT_UUID_SERVICE)),
-        { BT_DATA_NAME_SHORTENED, sizeof(mBLE.device_short) - 1, mBLE.device_short }
+                { BT_DATA_NAME_SHORTENED, sizeof(mBLE.device_short) - 1, mBLE.device_short }
 };
 
 static struct bt_data s_scan_data[] =
 {
+    BT_DATA_BYTES(BT_DATA_UUID128_ALL,
+                  BT_UUID_SERIAL_PORT_SERVICE),
     { BT_DATA_NAME_COMPLETE, sizeof(mBLE.device_name) - 1, mBLE.device_name }
 };
 

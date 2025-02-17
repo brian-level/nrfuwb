@@ -96,7 +96,7 @@ int BLEinternalNotifyUWB(struct bt_conn *conn, void *inData, uint16_t inDataLen)
     {
         struct bt_gatt_notify_params params =
         {
-            .uuid   = BT_UUID_UWBRX,
+            .uuid   = BT_UUID_UWB_TX,
             .attr   = attr,
             .data   = inData,
             .len    = inDataLen,

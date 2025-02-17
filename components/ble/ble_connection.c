@@ -28,53 +28,6 @@
 
 ble_context_t mBLE;
 
-static bool is_bt_shell_enabled = false;
-#ifdef CONFIG_SHELL_BT_NUS
-static void start_bt_shell(struct bt_conn *conn)
-{
-    shell_bt_nus_enable(conn);
-    is_bt_shell_enabled = true;
-}
-
-static void stop_bt_shell(void)
-{
-    shell_bt_nus_disable();
-    is_bt_shell_enabled = false;
-}
-#endif
-
-#ifdef CONFIG_MEMFAULT
-static bool _mds_access_enable(struct bt_conn *conn)
-{
-    int conndex;
-
-    for (conndex = 0; conndex < BT_MAX_CONCURRENT; conndex++)
-    {
-        if (mBLE.connections[conndex].conn == conn)
-        {
-            return mBLE.connections[conndex].unlocked;
-        }
-    }
-
-    return false;
-}
-
-static struct bt_mds_cb mds_cb;
-#endif
-#if defined(LEVEL_BT_SECURE)
-SessionOwner_t *mCurrentSession;
-SessionOwner_t* BLEGetCurrentSession(void)
-{
-    return mCurrentSession;
-}
-
-void BLESetCurrentSession(SessionOwner_t *inSession)
-{
-    mCurrentSession = inSession;
-    return;
-}
-#endif
-
 static void _connected(struct bt_conn *conn, uint8_t err)
 {
     int conndex;
@@ -106,7 +59,6 @@ static void _connected(struct bt_conn *conn, uint8_t err)
             else
             {
                 mBLE.connections[conndex].conn = bt_conn_ref(conn);
-                BLEunlock(conn);
             }
 
             break;
@@ -125,13 +77,6 @@ static void _connected(struct bt_conn *conn, uint8_t err)
     }
     else
     {
-#ifdef CONFIG_SHELL_BT_NUS
-        if (mBLE.connections[conndex].unlocked)
-        {
-            // this is started in the locked case in BLEunlock call
-            start_bt_shell(conn);
-        }
-#endif
         LOG_INF("Connected\n");
     }
 }
@@ -141,9 +86,7 @@ static void _disconnected(struct bt_conn *conn, uint8_t reason)
     int conndex;
 
     LOG_INF("Disconnected (reason %u)\n", reason);
-#ifdef CONFIG_SHELL_BT_NUS
-    stop_bt_shell();
-#endif
+
     // Unpair from all devices for now, pairing is required for
     // MDS but we may need multiple phones to access the service
     //
@@ -160,9 +103,6 @@ static void _disconnected(struct bt_conn *conn, uint8_t reason)
 
             bt_conn_unref(mBLE.connections[conndex].conn);
             mBLE.connections[conndex].conn = NULL;
-#if defined(LEVEL_BT_SECURE)
-            BLESetCurrentSession(NULL);
-#endif
             break;
         }
     }
@@ -193,38 +133,6 @@ ble_conn_context_t *BLEinternalConnectionOf(const void * const in_conn_handle)
     }
 
     return (conndex < BT_MAX_CONCURRENT) ? &mBLE.connections[conndex] : NULL;
-}
-
-int BLEunlock(ble_conn_handle_t in_conn)
-{
-    int conndex;
-    int result = -1;
-
-    for (conndex = 0; conndex < BT_MAX_CONCURRENT; conndex++)
-    {
-        if ((void*)mBLE.connections[conndex].conn == in_conn)
-        {
-            if (!mBLE.connections[conndex].unlocked)
-            {
-                LOG_WRN("BLE is unlocked");
-                mBLE.connections[conndex].unlocked = true;
-#ifdef CONFIG_SHELL_BT_NUS
-                if (!mBLE.shell_inited)
-                {
-                    mBLE.shell_inited = true;
-                    shell_bt_nus_init();
-                }
-
-                // TODO - handle multiple ble shells properly (or disable)
-                start_bt_shell(mBLE.connections[conndex].conn);
-#endif
-                result = 0;
-                break;
-            }
-        }
-    }
-
-    return result;
 }
 
 int BLEdisconnect(ble_conn_handle_t in_conn)
@@ -258,38 +166,13 @@ static struct bt_gatt_cb gatt_callbacks = {
     .att_mtu_updated    = _mtu_updated
 };
 
-bool BLEisShellEnabled(void)
-{
-    return is_bt_shell_enabled;
-}
-
 int BLEslice(uint32_t *outDelay)
 {
     int result = 0;
 
     result = BLEAdvertisingSlice();
-#ifdef LEVEL_BT_SECURE
-    result = SessionSlice();
-#endif
     return result;
 }
-
-#if 0
-int BLEsetDelegate(
-            ble_connect_callback_t    inConnectCallback,
-            ble_rxdata_callback_t     inRxDataCallback,
-            ble_mtu_update_callback_t inMTUupdateCallback
-            )
-{
-    int result = 0;
-
-    mBLE.connectCallback   = inConnectCallback;
-    mBLE.rxdataCallback    = inRxDataCallback;
-    mBLE.mtuUpdateCallback = inMTUupdateCallback;
-
-    return result;
-}
-#endif
 
 int BLEinit(const char *in_device_name, ble_connect_callback_t inConnectCallback)
 {
@@ -304,12 +187,7 @@ int BLEinit(const char *in_device_name, ble_connect_callback_t inConnectCallback
 
     result = BLEsetDeviceName(in_device_name);
     require_noerr(result, exit);
-#ifdef CONFIG_MEMFAULT
-    // Needs to be registered so memfault doesnt crash us
-    mds_cb.access_enable = _mds_access_enable;
-    result = bt_mds_cb_register(&mds_cb);
-    require_noerr(result, exit);
-#endif
+
     result = bt_enable(NULL);
     require_noerr(result, exit);
 
